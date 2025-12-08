@@ -1,0 +1,154 @@
+*vim-deepl.txt*     DeepL-powered translation + vocabulary trainer for Vim
+
+===============================================================================
+INTRODUCTION                                                         *deepl-trainer*
+
+deepl-trainer is a Vim plugin that integrates DeepL translation directly into Vim.
+It allows you to:
+- Translate single words or short phrases (up to 3 words)
+- Build a personal dictionary automatically
+- Practice vocabulary inside Vim using a spaced repetition trainer
+- Translate longer selections into a bottom history window
+- Fully async (Vim 8 / job_start / channels)
+- Works offline with dictionary cache after first translation
+
+===========================================================================
+
+INSTALLATION                                                *deepl-trainer-install*
+
+Using vim-plug:
+
+    Plug 'yourname/vim-deepl-trainer'
+
+Then run:
+
+    :PlugInstall
+
+Make sure you have a DeepL API key:
+
+    export DEEPL_API_KEY="your_token"
+
+Python 3 required.
+
+===========================================================================
+
+USAGE                                                             *deepl-trainer-usage*
+
+NORMAL MODE MAPPINGS ~
+
+    <F2>   Translate word under cursor (popup + store in dictionary)
+    <F3>   Cycle dictionary source language (EN ⇄ DA)
+    <S-F3> Cycle target language (RU → EN → DA → ...)
+
+VISUAL MODE ~
+
+    <F2>   Translate selection:
+          * if 1–3 words → treated as vocabulary “unit”
+                           stored in dictionary and available for the trainer
+          * if 4+ words → history window at bottom (5 lines)
+
+===========================================================================
+
+VOCABULARY TRAINER                                   *deepl-trainer-trainer*
+
+Command:
+
+    :DeepLTrainerStart
+
+Trainer buffer keys:
+
+    n   Next item (asynchronous)
+    s   Show translation
+    x   Mark “don’t know” (increase difficulty)
+    d   Never show again (ignored in future)
+    q   Quit trainer window
+
+Trainer features:
+- Spaced repetition based on count / difficulty / last_seen
+- Items sorted by weakest first
+- Shows global mastery progress
+
+===========================================================================
+
+HISTORY WINDOW                                               *deepl-trainer-history*
+
+Displayed when translating selections of 4+ words.
+
+Behavior:
+- Opens at bottom with fixed 5-line height
+- Appends each translation with timestamp and language info
+- Auto-scrolls to bottom
+- Focus returns to original editing window
+
+Buffer mapping:
+
+    q   Clear history and close the window
+
+===========================================================================
+
+CONFIGURATION OPTIONS                              *deepl-trainer-configuration*
+
+| Variable                   | Default                                         |
+|---------------------------|-------------------------------------------------|
+| g:deepl_api_key           | $DEEPL_API_KEY                                   |
+| g:deepl_target_lang       | 'RU'                                             |
+| g:deepl_lang_cycle        | ['RU', 'EN', 'DA']                               |
+| g:deepl_word_src_lang     | 'EN'                                             |
+| g:deepl_word_src_cycle    | ['EN', 'DA']                                     |
+| g:deepl_helper_path       | plugin_root/python/deepl_helper.py               |
+| g:deepl_dict_path_base    | ~/.local/share/vim-deepl-trainer/dict            |
+
+Dictionary files example:
+
+    ~/.local/share/vim-deepl-trainer/dict_en.json
+    ~/.local/share/vim-deepl-trainer/dict_da.json
+
+===========================================================================
+
+STATUSLINE SUPPORT                                    *deepl-trainer-statusline*
+
+Function returning target language indicator:
+
+    call DeepLStatus()
+
+Example with lightline:
+
+    let g:lightline = {
+    \ 'component_function': {
+    \   'deepl': 'DeepLStatus',
+    \ },
+    \ }
+
+Shows:
+
+    [DL:RU]
+
+===========================================================================
+
+REQUIREMENTS                                             *deepl-trainer-requirements*
+
+- Vim 8+ with +job +channel
+- Python 3
+- DeepL API key
+- Internet connection (first lookup only)
+
+===========================================================================
+
+LICENSE                                                    *deepl-trainer-license*
+
+MIT © Your Name + ChatGPT Collaboration
+
+===========================================================================
+
+THANKS                                                     *deepl-trainer-thanks*
+
+Contributor:
+- You 🚀 (primary author)
+- ChatGPT (assistant developer)
+
+Pull requests welcome!
+
+===========================================================================
+
+vim:tw=78:ts=8:noet:ft=help
+
