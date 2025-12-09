@@ -1,6 +1,9 @@
 " =======================================================
 " DeepL async translation + dictionary cache + history
 " Works in classic Vim 8/9 (job_start + channels)
+"
+" SPDX-License-Identifier: LGPL-3.0-only
+" Copyright (c) 2025 Romariozh
 " =======================================================
 
 " autoload/deepl.vim - core logic for vim-deepl
@@ -20,10 +23,7 @@ else
   let g:deepl_api_key = ''
 endif
 
-" 2) Dictionary path
-let g:deepl_dict_path_base = expand('~/.local/share/vim-deepl-trainer/dict')
-
-" 3) Target language cycle for selection translation
+" 2) Target language cycle for selection translation
 let g:deepl_target_lang = 'RU'
 let g:deepl_lang_cycle = ['RU', 'EN', 'DA']
 
@@ -393,11 +393,6 @@ function! deepl#trainer_start() abort
   call DeepLTrainerNext()
 endfunction
 
-" -------------------------------------------------------
-" Command for convenient start
-
-command! DeepLTrainerStart call DeepLTrainerStart()
-
 " =======================================================
 " Async WORD translation (job_start + out_cb/exit_cb)
 " =======================================================
@@ -565,6 +560,17 @@ function! s:DeepLSelExit(channel, status) abort
   let l:src      = get(l:res, 'source', '')
   let l:tr       = get(l:res, 'text', '')
 
+  " Normalize whitespace before comparing.
+  let l:src_norm = substitute(trim(l:src), '\s\+', ' ', 'g')
+  let l:tr_norm  = substitute(trim(l:tr),  '\s\+', ' ', 'g')
+
+  " If DeepL returns effectively the same text, it is probably code or non-translatable.
+  " Avoid polluting history in that case.
+  if l:src_norm ==# l:tr_norm
+    echo "DeepL: no change (probably code or non-translatable text)"
+    return
+  endif
+
   " -------------------------------
   " Count number of words in the source text
   " -------------------------------
@@ -617,6 +623,7 @@ function! s:DeepLSelExit(channel, status) abort
 endfunction
 
 function! deepl#translate_from_visual() abort
+  " Basic checks
   if empty(g:deepl_api_key)
     echo "Error: DEEPL_API_KEY is not set"
     return
@@ -632,9 +639,10 @@ function! deepl#translate_from_visual() abort
     return
   endif
 
+  " Get text from default register (Visual mapping does: y:call ...)
   let l:text = getreg('"')
   if empty(l:text)
-    echo "Register is empty"
+    echo "Selection is empty"
     return
   endif
 
@@ -645,17 +653,14 @@ function! deepl#translate_from_visual() abort
   let l:words = filter(split(l:clean), 'v:val !=# ""')
   let l:wc    = len(l:words)
 
-  " --- NEW: up to 3 words -> treat as "unit" for dictionary + trainer ---
+  " --- Case 1: 1–3 words -> treat as vocabulary unit (word/phrase) ---
   if l:wc > 0 && l:wc <= 3
-    " This will:
-    " - call DeepL via 'word' mode
-    " - store unit (word or short phrase) to JSON dictionary
-    " - show popup (through s:DeepLWordExit)
-    call DeepLTranslateUnit(s:DeepLCleanUnit(l:clean))
+    " Use the same logic as for word under cursor (dictionary + popup + trainer)
+    call DeepLTranslateUnit(l:clean)
     return
   endif
 
-  " --- 4+ words -> old behaviour via 'selection' + history window ---
+  " --- Case 2: 4+ words -> selection translation + history window ---
   let g:deepl_pending_sel = ''
 
   call job_start(

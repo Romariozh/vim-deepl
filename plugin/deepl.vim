@@ -1,5 +1,7 @@
 " vim-deepl - DeepL translation and vocabulary trainer for Vim
-" Version
+" SPDX-License-Identifier: LGPL-3.0-only
+" Copyright (c) 2025 Romariozh
+
 let g:deepl_version = '0.9.0-pre'
 
 " Prevent double loading
@@ -30,7 +32,7 @@ endif
 " Normal: translate word under cursor
 nnoremap <silent> <F2>  :call deepl#translate_word()<CR>
 " Visual: translate selection (word / phrase / long text)
-vnoremap <silent> <F2>  :call deepl#translate_from_visual()<CR>
+vnoremap <silent> <F2>  y:call deepl#translate_from_visual()<CR>
 
 " Cycle word source language (EN/DA)
 nnoremap <silent> <F3>  :call deepl#cycle_word_src_lang()<CR>

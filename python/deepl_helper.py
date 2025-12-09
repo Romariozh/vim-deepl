@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# vim-deepl - DeepL translation and vocabulary trainer for Vim
+# SPDX-License-Identifier: LGPL-3.0-only
+# Copyright (c) 2025 Romariozh
+
 import sys
 import os
 import json
@@ -9,6 +13,7 @@ from datetime import datetime
 
 
 def load_dict(path: str):
+    """Load a JSON dictionary file. Return empty dict if missing or broken."""
     if not os.path.exists(path):
         return {}
     try:
@@ -18,20 +23,21 @@ def load_dict(path: str):
         return {}
 
 def now_str() -> str:
+    """Get current datetime as a formatted string."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def save_dict(path: str, data: dict) -> None:
+    """Save dictionary JSON ensuring folder exists."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    directory = os.path.dirname(path)
-    if directory and not os.path.exists(directory):
-        os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-RECENT_DAYS = 7          # последние 7 дней считаем "новыми"
-MASTERY_COUNT = 7        # сколько повторений нужно, чтобы считать слово "освоенным"
+# Recent/learning parameters
+RECENT_DAYS = 7      # Words added within the last X days are considered "recent"
+MASTERY_COUNT = 7    # How many repetitions to consider a word mastered
 
 def parse_dt(s: str) -> datetime:
+    """Parse datetime string or return epoch default."""
     try:
         return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
     except Exception:
@@ -39,25 +45,27 @@ def parse_dt(s: str) -> datetime:
 
 def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     """
-    Выбор слова для тренажёра.
+    Pick a word/phrase for training.
 
-    Логика:
-    - фильтр по языку словаря: EN/DA (src_filter) или оба;
-    - делим слова на 2 корзины:
-        recent  -> добавлены за последние RECENT_DAYS дней
-        old     -> старше RECENT_DAYS
-    - выбираем корзину:
-        70% -> recent, 30% -> old (если обе не пустые)
-    - внутри корзины сортируем:
-        hard DESC, count ASC, last_used ASC
-      => "трудные", мало повторённые и давно не трогали — в приоритете
-    - обновляем last_used и count для выбранного слова
-    - считаем статистику прогресса:
-        сколько слов имеют count >= MASTERY_COUNT
+    Selection strategy:
+    - Filter by source: EN / DA or both
+    - Split entries into 2 buckets:
+        recent  -> added in last RECENT_DAYS
+        old     -> older entries
+    - Bucket selection:
+        - If both exist: 70% pick from recent, 30% from old
+    - Within bucket prioritize:
+        1. Not mastered (count < MASTERY_COUNT)
+        2. Lower count first
+        3. Higher "hard" score first
+        4. Least recently used first
+
+    On choice:
+    - Update last_used and count
+    - Return progress statistics
     """
 
     now = datetime.now()
-
     entries = []
 
     src_filter = (src_filter or "").upper()
@@ -73,7 +81,8 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
             continue
 
         for word, entry in data.items():
-            # NEW: skip words marked as ignored
+
+            # Skip words the user explicitly ignored
             if entry.get("ignore"):
                 continue
 
@@ -82,9 +91,7 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
 
             last_str = entry.get("last_used") or entry.get("date") or "1970-01-01 00:00:00"
             last_dt = parse_dt(last_str)
-
-            date_str = entry.get("date") or last_str
-            date_dt = parse_dt(date_str)
+            date_dt = parse_dt(entry.get("date") or last_str)
 
             age_days = (now - date_dt).days
             bucket = "recent" if age_days <= RECENT_DAYS else "old"
@@ -105,15 +112,15 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     if not entries:
         return {
             "type": "train",
-            "error": f"No words found in dictionaries for filter={src_filter or 'ALL'}",
+            "error": f"No entries for filter={src_filter or 'ALL'}",
         }
 
-    # --- Статистика прогресса ---
+    # --- Progress statistics ---
     total = len(entries)
     mastered = sum(1 for e in entries if e["count"] >= MASTERY_COUNT)
     mastery_percent = int(round(mastered * 100 / total)) if total else 0
 
-    # --- Split into recent/old ---
+    # --- select bucket ---
     recents = [e for e in entries if e["bucket"] == "recent"]
     olds = [e for e in entries if e["bucket"] == "old"]
 
@@ -122,22 +129,14 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     elif not olds:
         pool = recents
     else:
-        # 70% new words, 30% older words
-        if random.random() < 0.7:
-            pool = recents
-        else:
-            pool = olds
+        pool = recents if random.random() < 0.7 else olds
 
-    # ----------------------------------------------------------------
-    # Prefer not-mastered words (count < MASTERY_COUNT).
-    # Among them: lower count first, then "hard" words, then by last_used.
-    # ----------------------------------------------------------------
+    # Prefer not-mastered first
     not_mastered = [e for e in pool if e["count"] < MASTERY_COUNT]
     if not_mastered:
         pool = not_mastered
 
-    # Now: words with smaller count first,
-    # and within same count – those with higher "hard" first.
+    # Sorting priority
     pool.sort(key=lambda e: (e["count"], -e["hard"], e["last"]))
 
     chosen = pool[0]
@@ -146,7 +145,6 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     now_s = now_str()
     entry["last_used"] = now_s
     entry["count"] = entry.get("count", 0) + 1
-
     save_dict(chosen["path"], chosen["data"])
 
     return {
@@ -168,99 +166,61 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     }
 
 def mark_ignore(dict_base_path: str, src_filter: str, word: str):
-    """
-    Mark a word as "ignored":
-    - set 'ignore' = True in EN/DA dictionary
-    - trainer will completely skip such words
-    """
+    """Mark a vocabulary entry as permanently ignored (trainer skips it)."""
     src = (src_filter or "").upper()
     if src not in ("EN", "DA"):
-        return {
-            "type": "ignore",
-            "error": f"Unsupported src_filter={src_filter}",
-        }
+        return {"type": "ignore", "error": f"Unsupported src_filter={src_filter}"}
 
     path = f"{dict_base_path}_{src.lower()}.json"
     data = load_dict(path)
 
     if word not in data:
-        return {
-            "type": "ignore",
-            "error": f"Word '{word}' not found in {path}",
-        }
+        return {"type": "ignore", "error": f"Word '{word}' not found in {path}"}
 
     entry = data[word]
     entry["ignore"] = True
     save_dict(path, data)
 
-    return {
-        "type": "ignore",
-        "word": word,
-        "src_lang": src,
-        "ignore": True,
-        "error": None,
-    }
+    return {"type": "ignore", "word": word, "src_lang": src, "ignore": True, "error": None}
 
 def mark_hard(dict_base_path: str, src_filter: str, word: str):
-    """
-    Отметить слово как 'трудное':
-    - увеличиваем поле 'hard' на 1 в словаре EN/DA
-    """
-
+    """Mark word as difficult by incrementing 'hard' counter."""
     src = (src_filter or "").upper()
     if src not in ("EN", "DA"):
-        return {
-            "type": "mark_hard",
-            "error": f"Unsupported src_filter={src_filter}",
-        }
+        return {"type": "mark_hard", "error": f"Unsupported src_filter={src_filter}"}
 
     path = f"{dict_base_path}_{src.lower()}.json"
     data = load_dict(path)
 
     if word not in data:
-        return {
-            "type": "mark_hard",
-            "error": f"Word '{word}' not found in {path}",
-        }
+        return {"type": "mark_hard", "error": f"Word '{word}' not found in {path}"}
 
     entry = data[word]
     entry["hard"] = entry.get("hard", 0) + 1
     save_dict(path, data)
 
-    return {
-        "type": "mark_hard",
-        "word": word,
-        "src_lang": src,
-        "hard": entry["hard"],
-        "error": None,
-    }
+    return {"type": "mark_hard", "word": word, "src_lang": src, "hard": entry["hard"], "error": None}
 
 def deepl_call(text: str, target_lang: str):
+    """Perform a DeepL API call."""
     api_key = os.environ.get("DEEPL_API_KEY", "")
     if not api_key:
-        return None, "", "DEEPL_API_KEY is not set in environment."
+        return None, "", "DEEPL_API_KEY is not set."
 
     url = "https://api-free.deepl.com/v2/translate"
-
-    # Можно через form-encoded (как у тебя было) – ответ такой же, как в curl.
-    params = {
-        "auth_key": api_key,
-        "text": text,
-        "target_lang": target_lang,
-    }
+    params = {"auth_key": api_key, "text": text, "target_lang": target_lang}
     data = urllib.parse.urlencode(params).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
 
     try:
         with urllib.request.urlopen(req) as resp:
-            response_text = resp.read().decode("utf-8")
-            response = json.loads(response_text)
+            response = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         return None, "", f"DeepL request error: {e}"
 
     translations = response.get("translations") or []
     if not translations:
-        return None, "", "Empty response from DeepL API."
+        return None, "", "DeepL empty response."
 
     tr_obj = translations[0]
     translated_text = tr_obj.get("text", "")
@@ -269,38 +229,30 @@ def deepl_call(text: str, target_lang: str):
     return translated_text, detected_lang, None
 
 def oneline(text: str) -> str:
+    """Convert text into a single whitespace-normalized line."""
     parts = [line.strip() for line in text.splitlines() if line.strip()]
     return " ".join(parts)
 
 def normalize_src_lang(detected: str, src_hint: str) -> str:
-    """
-    detected  - что вернул DeepL (EN, DA, NL, SV, EN-GB, ...)
-    src_hint  - EN или DA от Vim (что ты сам выбрал)
-    """
+    """Normalize DeepL language code using fallback to hint."""
     code = (detected or "").upper()
     hint = (src_hint or "").upper()
 
-    # 1) Сначала доверяем DeepL, если это EN/DA
     if code.startswith("EN"):
         return "EN"
     if code.startswith("DA"):
         return "DA"
-
-    # 2) Если DeepL что-то странное (NL, SV, DE, ...),
-    #    используем то, что выбрал пользователь в Vim
     if hint in ("EN", "DA"):
         return hint
-
-    # 3) На всякий случай дефолт
     return "EN"
 
 def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: str = ""):
-    key = word  # при желании можно сделать word.lower()
-
-    # 1) Пробуем кэш в обоих словарях EN/DA
+    """Full async word translation with caching and training counters."""
+    key = word
     src_langs = ["EN", "DA"]
     dicts = {}
 
+    # Try both dictionaries first
     for src in src_langs:
         path = f"{dict_base_path}_{src.lower()}.json"
         data = load_dict(path)
@@ -308,19 +260,18 @@ def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: s
 
         if key in data:
             entry = data[key]
-            entry.setdefault("date", now_str())
-            entry["last_used"] = now_str()
+            now = now_str()
+            entry.setdefault("date", now)
+            entry["last_used"] = now
             entry["count"] = entry.get("count", 0) + 1
             entry.setdefault("lang", target_lang)
             entry.setdefault("src_lang", src)
-
             save_dict(path, data)
 
-            tr = entry.get("text", "N/A")
             return {
                 "type": "word",
                 "source": word,
-                "text": tr,
+                "text": entry.get("text", "N/A"),
                 "target_lang": target_lang,
                 "detected_source_lang": entry.get("src_lang", src),
                 "from_cache": True,
@@ -330,21 +281,12 @@ def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: s
                 "error": None,
             }
 
-    # 2) В кэше нет → спрашиваем DeepL
+    # Not in cache: ask DeepL
     tr, detected, err = deepl_call(word, target_lang)
     if err:
-        return {
-            "type": "word",
-            "source": word,
-            "text": "",
-            "target_lang": target_lang,
-            "detected_source_lang": "",
-            "from_cache": False,
-            "timestamp": "",
-            "error": err,
-        }
+        return {"type": "word", "source": word, "text": "", "target_lang": target_lang,
+                "detected_source_lang": "", "from_cache": False, "timestamp": "", "error": err}
 
-    # 3) Определяем, в какой словарь класть (EN/DA)
     src = normalize_src_lang(detected, src_hint)
     path, data = dicts.get(src, (f"{dict_base_path}_{src.lower()}.json", None))
     if data is None:
@@ -356,51 +298,32 @@ def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: s
         "date": now,
         "last_used": now,
         "count": 1,
-        "lang": target_lang,       # RU
-        "src_lang": src,           # EN или DA
-        "detected_raw": detected,  # то, что реально сказал DeepL (EN/NL/SV/...)
+        "lang": target_lang,
+        "src_lang": src,
+        "detected_raw": detected,
     }
     save_dict(path, data)
 
-    return {
-        "type": "word",
-        "source": word,
-        "text": tr,
-        "target_lang": target_lang,
-        "detected_source_lang": src,
-        "from_cache": False,
-        "timestamp": now,
-        "last_used": now,
-        "count": 1,
-        "error": None,
-    }
+    return {"type": "word", "source": word, "text": tr, "target_lang": target_lang,
+            "detected_source_lang": src, "from_cache": False, "timestamp": now,
+            "last_used": now, "count": 1, "error": None}
 
 def translate_selection(text: str, target_lang: str):
+    """Translate a multi-word text block without caching."""
     text_clean = oneline(text)
     tr, detected, err = deepl_call(text_clean, target_lang)
     if err:
-        return {
-            "type": "selection",
-            "source": text_clean,
-            "text": "",
-            "target_lang": target_lang,
-            "detected_source_lang": detected,
-            "timestamp": "",
-            "error": err,
-        }
+        return {"type": "selection", "source": text_clean, "text": "",
+                "target_lang": target_lang, "detected_source_lang": detected,
+                "timestamp": "", "error": err}
 
     now = now_str()
-    return {
-        "type": "selection",
-        "source": text_clean,
-        "text": oneline(tr),
-        "target_lang": target_lang,
-        "detected_source_lang": detected,
-        "timestamp": now,
-        "error": None,
-    }
+    return {"type": "selection", "source": text_clean, "text": oneline(tr),
+            "target_lang": target_lang, "detected_source_lang": detected,
+            "timestamp": now, "error": None}
 
 def main():
+    """CLI entry point called asynchronously from Vim."""
     if len(sys.argv) < 3:
         print(json.dumps({"error": "Not enough arguments"}, ensure_ascii=False))
         sys.exit(1)
@@ -409,48 +332,37 @@ def main():
     text = sys.argv[2]
 
     if mode == "word":
-        # usage: script.py word <WORD> <DICT_BASE_PATH> [TARGET_LANG] [SRC_HINT]
         if len(sys.argv) < 4:
-            print(json.dumps({"error": "Dictionary base path is required for word mode"}, ensure_ascii=False))
+            print(json.dumps({"error": "Missing dict path"}, ensure_ascii=False))
             sys.exit(1)
-
         dict_base_path = sys.argv[3]
         target_lang = sys.argv[4] if len(sys.argv) >= 5 else "RU"
         src_hint = sys.argv[5] if len(sys.argv) >= 6 else ""
-
         result = translate_word(text, dict_base_path, target_lang, src_hint)
 
     elif mode == "selection":
-        if len(sys.argv) < 3:
-            print(json.dumps({"error": "Text is required for selection mode"}, ensure_ascii=False))
-            sys.exit(1)
         target_lang = sys.argv[3] if len(sys.argv) >= 4 else "RU"
-        tr, detected, err = deepl_call(oneline(text), target_lang)
-        # ... здесь можно оставить твою прежнюю логику translate_selection
         result = translate_selection(text, target_lang)
 
     elif mode == "train":
-        # usage: script.py train <DICT_BASE_PATH> [SRC_FILTER]
-        dict_base_path = text  # sys.argv[2]
+        dict_base_path = text
         src_filter = sys.argv[3] if len(sys.argv) >= 4 else ""
         result = pick_training_word(dict_base_path, src_filter or None)
 
     elif mode == "mark_hard":
-        # usage: script.py mark_hard <DICT_BASE_PATH> <SRC_FILTER> <WORD>
         if len(sys.argv) < 5:
-            result = {"type": "mark_hard", "error": "Not enough arguments for mark_hard"}
+            result = {"type": "mark_hard", "error": "Not enough arguments"}
         else:
-            dict_base_path = text  # sys.argv[2]
+            dict_base_path = text
             src_filter = sys.argv[3]
             word = sys.argv[4]
             result = mark_hard(dict_base_path, src_filter, word)
 
     elif mode == "ignore":
-        # usage: script.py ignore <DICT_BASE_PATH> <SRC_FILTER> <WORD>
         if len(sys.argv) < 5:
-            result = {"type": "ignore", "error": "Not enough arguments for ignore"}
+            result = {"type": "ignore", "error": "Not enough arguments"}
         else:
-            dict_base_path = text  # sys.argv[2]
+            dict_base_path = text
             src_filter = sys.argv[3]
             word = sys.argv[4]
             result = mark_ignore(dict_base_path, src_filter, word)
