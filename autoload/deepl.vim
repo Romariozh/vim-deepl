@@ -13,6 +13,14 @@ if exists('g:loaded_deepl_autoload')
 endif
 let g:loaded_deepl_autoload = 1
 
+if !exists('g:deepl_backend')
+  let g:deepl_backend = 'python'
+endif
+
+if !exists('g:deepl_api_base')
+  let g:deepl_api_base = 'http://127.0.0.1:8787'
+endif
+
 " You can keep global config defaults here if needed, but plugin file already
 " sets g:deepl_helper_path and g:deepl_dict_path_base.
 
@@ -262,16 +270,34 @@ function! DeepLTrainerNext() abort
 
   let g:deepl_pending_train = ''
 
-  call job_start(
-        \ ['python3', g:deepl_helper_path, 'train', g:deepl_dict_path_base, l:src_filter],
-        \ {
-        \ 'out_cb':  function('s:DeepLTrainOut'),
-        \ 'err_cb':  function('s:DeepLTrainErr'),
+  if g:deepl_backend ==# 'http'
+    " HTTP backend: /train/next
+    let l:payload = json_encode({'src_filter': l:src_filter})
+    let l:cmd = [
+          \ 'curl', '-sS',
+          \ '-X', 'POST',
+          \ '-H', 'Content-Type: application/json',
+          \ '-d', l:payload,
+          \ g:deepl_api_base . '/train/next',
+          \ ]
+  else
+    " Legacy python backend
+    let l:cmd = [
+          \ 'python3',
+          \ g:deepl_helper_path,
+          \ 'train',
+          \ g:deepl_dict_path_base,
+          \ l:src_filter,
+          \ ]
+  endif
+
+  call job_start(l:cmd, {
+        \ 'out_cb': function('s:DeepLTrainOut'),
+        \ 'err_cb': function('s:DeepLTrainErr'),
         \ 'exit_cb': function('s:DeepLTrainExit'),
         \ 'out_mode': 'raw',
         \ 'err_mode': 'raw',
-        \ }
-        \ )
+        \ })
 endfunction
 
 function! DeepLTrainerMarkHard() abort
@@ -292,16 +318,33 @@ function! DeepLTrainerMarkHard() abort
   endif
 
   " Asynchronously mark the word as "hard" in Python
-  call job_start(
-        \ ['python3', g:deepl_helper_path, 'mark_hard', g:deepl_dict_path_base, l:src, l:word],
-        \ {
-        \ 'out_cb':  {ch, msg -> 0},
-        \ 'err_cb':  {ch, msg -> execute('echo "deepl_helper stderr(mark_hard): ".msg')},
-        \ 'exit_cb': {ch, st  -> 0},
+  if g:deepl_backend ==# 'http'
+    let l:payload = json_encode({'word': l:word, 'src_filter': l:src})
+    let l:cmd = [
+          \ 'curl', '-sS',
+          \ '-X', 'POST',
+          \ '-H', 'Content-Type: application/json',
+          \ '-d', l:payload,
+          \ g:deepl_api_base . '/train/mark_hard',
+          \ ]
+  else
+    let l:cmd = [
+          \ 'python3',
+          \ g:deepl_helper_path,
+          \ 'mark_hard',
+          \ g:deepl_dict_path_base,
+          \ l:src,
+          \ l:word,
+          \ ]
+  endif
+
+  call job_start(l:cmd, {
+        \ 'out_cb': {ch, msg -> 0},
+        \ 'err_cb': {ch, msg -> execute('echo "deepl_helper stderr(mark_hard): ".msg')},
+        \ 'exit_cb': {ch, st -> 0},
         \ 'out_mode': 'raw',
         \ 'err_mode': 'raw',
-        \ }
-        \ )
+        \ })
 
   " Locally increment hard and re-render (with translation shown)
   let l:hard = get(g:deepl_trainer_current, 'hard', 0) + 1
@@ -327,16 +370,33 @@ function! DeepLTrainerIgnore() abort
   endif
 
   " Asynchronously mark word as ignored in Python
-  call job_start(
-        \ ['python3', g:deepl_helper_path, 'ignore', g:deepl_dict_path_base, l:src, l:word],
-        \ {
-        \ 'out_cb':  {ch, msg -> 0},
-        \ 'err_cb':  {ch, msg -> execute('echo "deepl_helper stderr(ignore): ".msg')},
-        \ 'exit_cb': {ch, st  -> 0},
+  if g:deepl_backend ==# 'http'
+    let l:payload = json_encode({'word': l:word, 'src_filter': l:src})
+    let l:cmd = [
+          \ 'curl', '-sS',
+          \ '-X', 'POST',
+          \ '-H', 'Content-Type: application/json',
+          \ '-d', l:payload,
+          \ g:deepl_api_base . '/train/mark_ignore',
+          \ ]
+  else
+    let l:cmd = [
+          \ 'python3',
+          \ g:deepl_helper_path,
+          \ 'ignore',
+          \ g:deepl_dict_path_base,
+          \ l:src,
+          \ l:word,
+          \ ]
+  endif
+
+  call job_start(l:cmd, {
+        \ 'out_cb': {ch, msg -> 0},
+        \ 'err_cb': {ch, msg -> execute('echo "deepl_helper stderr(ignore): ".msg')},
+        \ 'exit_cb': {ch, st -> 0},
         \ 'out_mode': 'raw',
         \ 'err_mode': 'raw',
-        \ }
-        \ )
+        \ })
 
   " Optionally set local flag and immediately go to the next word
   let g:deepl_trainer_current.ignore = 1
@@ -354,7 +414,8 @@ function! DeepLTrainerShow() abort
 endfunction
 
 function! deepl#trainer_start() abort
-  if empty(g:deepl_api_key)
+  " Trainer also does not need API key when using HTTP backend.
+  if g:deepl_backend !=# 'http' && empty(g:deepl_api_key)
     echo "Error: DEEPL_API_KEY is not set"
     return
   endif
@@ -454,6 +515,19 @@ function! s:DeepLWordExit(channel, status) abort
 endfunction
 
 " -------------------------------------------------------
+"  HTTP POST
+function! deepl#HttpPost(path, payload) abort
+  let l:url = g:deepl_api_base . a:path
+  let l:json = json_encode(a:payload)
+  let l:cmd = ['curl', '-sS', '-X', 'POST', '-H', 'Content-Type: application/json', '-d', l:json, l:url]
+  let l:out = system(l:cmd)
+  if v:shell_error != 0
+    throw 'DeepL HTTP backend error: ' . l:out
+  endif
+  return json_decode(l:out)
+endfunction
+
+" -------------------------------------------------------
 function! deepl#translate_word()  abort
   let l:word = expand('<cword>')
   if empty(l:word)
@@ -466,7 +540,9 @@ endfunction
 " -------------------------------------------------------
 " Translate arbitrary unit (word or short phrase) and store it in dictionary.
 function! DeepLTranslateUnit(text) abort
-  if empty(g:deepl_api_key)
+  " For python backend we still require DEEPL_API_KEY,
+  " but HTTP backend does not need it inside Vim.
+  if g:deepl_backend !=# 'http' && empty(g:deepl_api_key)
     echo "Error: DEEPL_API_KEY is not set"
     return
   endif
@@ -493,16 +569,41 @@ function! DeepLTranslateUnit(text) abort
 
   let g:deepl_pending_word = ''
 
-  call job_start(
-        \ ['python3', g:deepl_helper_path, 'word', l:unit, l:dict_base, l:target, l:src_hint],
-        \ {
-        \ 'out_cb':  function('s:DeepLWordOut'),
-        \ 'err_cb':  function('s:DeepLWordErr'),
+  " Build command depending on backend
+  if g:deepl_backend ==# 'http'
+    " HTTP backend: call FastAPI /translate/word endpoint via curl
+    let l:payload = json_encode({
+          \ 'term': l:unit,
+          \ 'target_lang': l:target,
+          \ 'src_hint': l:src_hint,
+          \ })
+    let l:cmd = [
+          \ 'curl', '-sS',
+          \ '-X', 'POST',
+          \ '-H', 'Content-Type: application/json',
+          \ '-d', l:payload,
+          \ g:deepl_api_base . '/translate/word',
+          \ ]
+  else
+    " Legacy python backend
+    let l:cmd = [
+          \ 'python3',
+          \ g:deepl_helper_path,
+          \ 'word',
+          \ l:unit,
+          \ l:dict_base,
+          \ l:target,
+          \ l:src_hint,
+          \ ]
+  endif
+
+  call job_start(l:cmd, {
+        \ 'out_cb': function('s:DeepLWordOut'),
+        \ 'err_cb': function('s:DeepLWordErr'),
         \ 'exit_cb': function('s:DeepLWordExit'),
         \ 'out_mode': 'raw',
         \ 'err_mode': 'raw',
-        \ }
-        \ )
+        \ })
 endfunction
 
 " -------------------------------------------------------
@@ -595,11 +696,23 @@ function! s:DeepLSelExit(channel, status) abort
   let g:deepl_request_counter += 1
   let l:index = g:deepl_request_counter
 
+  " Fallback if API didn’t send timestamp
+  if empty(l:ts)
+    let l:ts = strftime('%Y-%m-%d %H:%M:%S')
+  endif
+  
+  " Normalize source/translation to a single logical line
+  let l:src_clean = substitute(l:src, '\n', ' ', 'g')
+  let l:src_clean = substitute(l:src_clean, '\s\+', ' ', 'g')
+
+  let l:tr_clean = substitute(l:tr, '\n', ' ', 'g')
+  let l:tr_clean = substitute(l:tr_clean, '\s\+', ' ', 'g')
+
   " Form history entry (so it is still saved)
   let g:deepl_last_entry =
         \ '#' . l:index . ' [' . l:ts . '] [' . l:lang_tag . "]\n"
-        \ . 'SOURCE: ' . l:src . "\n"
-        \ . 'TRANSLATION: ' . l:tr . "\n"
+        \ . 'SRC: ' . l:src_clean . "\n"
+        \ . 'TRN: ' . l:tr_clean . "\n"
 
   " -------------------------------
   " BRANCH 1: up to 3 words -> popup
@@ -624,7 +737,7 @@ endfunction
 
 function! deepl#translate_from_visual() abort
   " Basic checks
-  if empty(g:deepl_api_key)
+  if g:deepl_backend !=# 'http' && empty(g:deepl_api_key)
     echo "Error: DEEPL_API_KEY is not set"
     return
   endif
@@ -646,6 +759,11 @@ function! deepl#translate_from_visual() abort
     return
   endif
 
+  " Same target and src_hint logic as for single word translation
+  let l:dict_base = g:deepl_dict_path_base    " ~/.vim_deepl_dict
+  let l:target    = 'RU'                      " learn only RU (your current logic)
+  let l:src_hint  = g:deepl_word_src_lang     " EN or DA
+
   " Flatten newlines for safe CLI argument and word counting
   let l:clean = substitute(l:text, '\n', ' ', 'g')
 
@@ -663,16 +781,40 @@ function! deepl#translate_from_visual() abort
   " --- Case 2: 4+ words -> selection translation + history window ---
   let g:deepl_pending_sel = ''
 
-  call job_start(
-        \ ['python3', g:deepl_helper_path, 'selection', l:clean, g:deepl_target_lang],
-        \ {
-        \ 'out_cb':  function('s:DeepLSelOut'),
-        \ 'err_cb':  function('s:DeepLSelErr'),
-        \ 'exit_cb': function('s:DeepLSelExit'),
-        \ 'out_mode': 'raw',
-        \ 'err_mode': 'raw',
-        \ }
-        \ )
+    if g:deepl_backend ==# 'http'
+      " HTTP backend for long selection
+      let l:payload = json_encode({
+        \ 'text': l:text,
+        \ 'target_lang': l:target,
+        \ 'src_hint': l:src_hint,
+        \ })
+      let l:cmd = [
+        \ 'curl', '-sS',
+        \ '-X', 'POST',
+        \ '-H', 'Content-Type: application/json',
+        \ '-d', l:payload,
+        \ g:deepl_api_base . '/translate/selection',
+        \ ]
+    else
+      " Legacy python backend (fallback)
+      let l:cmd = [
+        \ 'python3',
+        \ g:deepl_helper_path,
+        \ 'selection',
+        \ l:text,
+        \ g:deepl_dict_path_base,
+        \ l:target,
+        \ l:src_hint,
+        \ ]
+    endif
+
+    call job_start(l:cmd, {
+       \ 'out_cb': function('s:DeepLSelOut'),
+       \ 'err_cb': function('s:DeepLSelErr'),
+       \ 'exit_cb': function('s:DeepLSelExit'),
+       \ 'out_mode': 'raw',
+       \ 'err_mode': 'raw',
+       \ })
 endfunction
 
 " =======================================================
@@ -693,9 +835,11 @@ function! DeepLShowInWindow() abort
   let l:bufnr   = bufnr(l:bufname)
 
   " --- Open or reuse bottom window with height 5 lines ---
+  let l:win_height = 7 
+
   if l:bufnr == -1
     " Buffer does not exist yet — create new split at the bottom
-    execute 'botright 5new'
+    execute 'botright ' . l:win_height . 'new'
     let l:bufnr = bufnr('%')
     execute 'file ' . l:bufname
   else
@@ -703,14 +847,13 @@ function! DeepLShowInWindow() abort
     let l:wnr = bufwinnr(l:bufnr)
     if l:wnr == -1
       " Buffer exists but is not shown — open in a new bottom split
-      execute 'botright 5split'
+      execute 'botright ' . l:win_height . 'split'
       execute 'buffer ' . l:bufnr
     else
       " Buffer is already visible — just jump to its window
       execute l:wnr . 'wincmd w'
+      execute 'resize ' . l:win_height
     endif
-    " Ensure exact height
-    execute 'resize 5'
   endif
 
   " Local options for history window
@@ -738,13 +881,26 @@ function! DeepLShowInWindow() abort
   " Make non-modifiable to avoid accidental edits
   setlocal nomodifiable
 
-  " Scroll to the bottom
+  " Scroll to bottom, then move cursor to the header line of the last entry ("#N [...] [...]").
+  " Go to end (latest entry at bottom)
   normal! G
 
+  " Move cursor to header line of the last entry
+  let l:pos = search('^#\d\+ ', 'bW')
+  if l:pos == 0
+    " If not found, keep cursor at bottom
+    normal! G
+  else
+    " Put header line at top of the window
+    normal! zt
+  endif 
   " Restore focus to the original window (main text)
   if l:curwin > 0 && winnr() != l:curwin
     execute l:curwin . 'wincmd w'
   endif
+  " Clear command line & redraw to remove status junk
+  silent! echo ""
+  silent! redraw!
 endfunction
 
 function! DeepLClearHistory() abort
