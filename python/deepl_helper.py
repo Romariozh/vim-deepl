@@ -6,6 +6,7 @@
 import sys
 import os
 import json
+import sqlite3
 import urllib.request
 import urllib.parse
 import random
@@ -43,84 +44,217 @@ def parse_dt(s: str) -> datetime:
     except Exception:
         return datetime(1970, 1, 1)
 
+# --- SQLite storage ---
+
+DB_FILENAME = "vocab.db"
+
+
+def get_db_path(dict_base_path: str) -> str:
+    """
+    Build path to SQLite DB near the old JSON dictionaries.
+
+    Example:
+    dict_base_path=~/.local/share/vim-deepl/dict
+    -> ~/.local/share/vim-deepl/vocab.db
+    """
+    base_dir = os.path.dirname(dict_base_path)
+    os.makedirs(base_dir, exist_ok=True)
+    return os.path.join(base_dir, DB_FILENAME)
+
+
+def get_conn(dict_base_path: str) -> sqlite3.Connection:
+    """Open SQLite connection (and initialize schema on first use)."""
+    db_path = get_db_path(dict_base_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    return conn
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    """Create tables/indexes if they do not exist."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS entries (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            term         TEXT NOT NULL,
+            translation  TEXT NOT NULL,
+            src_lang     TEXT NOT NULL,
+            dst_lang     TEXT NOT NULL,
+            detected_raw TEXT,
+            created_at   TEXT NOT NULL,
+            last_used    TEXT,
+            count        INTEGER NOT NULL DEFAULT 0,
+            hard         INTEGER NOT NULL DEFAULT 0,
+            ignore       INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(term, src_lang, dst_lang)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_entries_src_ignore
+            ON entries(src_lang, ignore)
+        """
+    )
+    conn.commit()
+
+
+def db_get_entry_any_src(
+    conn: sqlite3.Connection,
+    term: str,
+    dst_lang: str,
+) -> sqlite3.Row | None:
+    """
+    Найти слово по term и целевому языку (dst_lang), не зная src_lang заранее.
+    Берем одну самую «используемую» запись.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM entries
+        WHERE term = ?
+          AND dst_lang = ?
+          AND ignore = 0
+        ORDER BY count DESC, last_used DESC
+        LIMIT 1
+        """,
+        (term, dst_lang),
+    )
+    return cur.fetchone()
+
+
+def db_upsert_entry(
+    conn: sqlite3.Connection,
+    term: str,
+    translation: str,
+    src_lang: str,
+    dst_lang: str,
+    detected_raw: str,
+    now_s: str,
+) -> None:
+    """Вставить или обновить запись о слове."""
+    conn.execute(
+        """
+        INSERT INTO entries (
+            term, translation, src_lang, dst_lang,
+            detected_raw, created_at, last_used, count
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(term, src_lang, dst_lang)
+        DO UPDATE SET
+            translation  = excluded.translation,
+            detected_raw = excluded.detected_raw
+        """,
+        (term, translation, src_lang, dst_lang, detected_raw, now_s, now_s),
+    )
+    conn.commit()
+
+
+def db_touch_usage(
+    conn: sqlite3.Connection,
+    entry_id: int,
+    now_s: str,
+) -> None:
+    """Обновить last_used и увеличить count."""
+    conn.execute(
+        """
+        UPDATE entries
+        SET last_used = ?,
+            count     = count + 1
+        WHERE id = ?
+        """,
+        (now_s, entry_id),
+    )
+    conn.commit()
+
 def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     """
-    Pick a word/phrase for training.
+    Выбрать слово/фразу для тренировки из SQLite.
 
-    Selection strategy:
-    - Filter by source: EN / DA or both
-    - Split entries into 2 buckets:
-        recent  -> added in last RECENT_DAYS
-        old     -> older entries
-    - Bucket selection:
-        - If both exist: 70% pick from recent, 30% from old
-    - Within bucket prioritize:
-        1. Not mastered (count < MASTERY_COUNT)
-        2. Lower count first
-        3. Higher "hard" score first
-        4. Least recently used first
-
-    On choice:
-    - Update last_used and count
-    - Return progress statistics
+    Логика полностью повторяет старую версию:
+    - фильтрация по src_lang (EN/DA или оба),
+    - деление на "recent" / "old" по RECENT_DAYS,
+    - 70% recent / 30% old при наличии обоих,
+    - приоритет:
+        1. count < MASTERY_COUNT
+        2. меньший count
+        3. больший hard
+        4. давнее использование (LRU)
     """
-
     now = datetime.now()
-    entries = []
-
     src_filter = (src_filter or "").upper()
+
     if src_filter in ("EN", "DA"):
         src_langs = [src_filter]
     else:
         src_langs = ["EN", "DA"]
 
-    for src in src_langs:
-        path = f"{dict_base_path}_{src.lower()}.json"
-        data = load_dict(path)
-        if not data:
-            continue
+    conn = get_conn(dict_base_path)
+    placeholders = ",".join("?" for _ in src_langs)
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT
+            id,
+            term,
+            translation,
+            src_lang,
+            dst_lang,
+            detected_raw,
+            created_at,
+            last_used,
+            count,
+            hard,
+            ignore
+        FROM entries
+        WHERE ignore = 0
+          AND src_lang IN ({placeholders})
+        """,
+        src_langs,
+    )
+    rows = cur.fetchall()
 
-        for word, entry in data.items():
-
-            # Skip words the user explicitly ignored
-            if entry.get("ignore"):
-                continue
-
-            cnt = entry.get("count", 0)
-            hard = entry.get("hard", 0)
-
-            last_str = entry.get("last_used") or entry.get("date") or "1970-01-01 00:00:00"
-            last_dt = parse_dt(last_str)
-            date_dt = parse_dt(entry.get("date") or last_str)
-
-            age_days = (now - date_dt).days
-            bucket = "recent" if age_days <= RECENT_DAYS else "old"
-
-            entries.append({
-                "src": src,
-                "word": word,
-                "entry": entry,
-                "path": path,
-                "data": data,
-                "count": cnt,
-                "last": last_dt,
-                "date_dt": date_dt,
-                "bucket": bucket,
-                "hard": hard,
-            })
-
-    if not entries:
+    if not rows:
         return {
             "type": "train",
             "error": f"No entries for filter={src_filter or 'ALL'}",
         }
 
-    # --- Progress statistics ---
+    entries = []
+    for row in rows:
+        last_str = (
+            row["last_used"]
+            or row["created_at"]
+            or "1970-01-01 00:00:00"
+        )
+        date_dt = parse_dt(row["created_at"] or last_str)
+        last_dt = parse_dt(last_str)
+        age_days = (now - date_dt).days
+        bucket = "recent" if age_days <= RECENT_DAYS else "old"
+
+        entries.append(
+            {
+                "id": row["id"],
+                "src": row["src_lang"],
+                "word": row["term"],
+                "translation": row["translation"],
+                "target_lang": row["dst_lang"],
+                "count": row["count"],
+                "hard": row["hard"],
+                "last": last_dt,
+                "date_dt": date_dt,
+                "bucket": bucket,
+            }
+        )
+
+    # --- Статистика прогресса ---
     total = len(entries)
     mastered = sum(1 for e in entries if e["count"] >= MASTERY_COUNT)
     mastery_percent = int(round(mastered * 100 / total)) if total else 0
 
-    # --- select bucket ---
+    # --- делим по "recent"/"old" ---
     recents = [e for e in entries if e["bucket"] == "recent"]
     olds = [e for e in entries if e["bucket"] == "old"]
 
@@ -131,31 +265,27 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     else:
         pool = recents if random.random() < 0.7 else olds
 
-    # Prefer not-mastered first
+    # сначала те, кто ещё не "mastered"
     not_mastered = [e for e in pool if e["count"] < MASTERY_COUNT]
     if not_mastered:
         pool = not_mastered
 
-    # Sorting priority
+    # сортировка по приоритету
     pool.sort(key=lambda e: (e["count"], -e["hard"], e["last"]))
-
     chosen = pool[0]
-    entry = chosen["entry"]
 
     now_s = now_str()
-    entry["last_used"] = now_s
-    entry["count"] = entry.get("count", 0) + 1
-    save_dict(chosen["path"], chosen["data"])
+    db_touch_usage(conn, chosen["id"], now_s)
 
     return {
         "type": "train",
         "word": chosen["word"],
-        "translation": entry.get("text", ""),
+        "translation": chosen["translation"],
         "src_lang": chosen["src"],
-        "target_lang": entry.get("lang", "RU"),
+        "target_lang": chosen["target_lang"],
         "timestamp": now_s,
-        "count": entry.get("count", 0),
-        "hard": entry.get("hard", 0),
+        "count": chosen["count"] + 1,
+        "hard": chosen["hard"],
         "stats": {
             "total": total,
             "mastered": mastered,
@@ -166,40 +296,89 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     }
 
 def mark_ignore(dict_base_path: str, src_filter: str, word: str):
-    """Mark a vocabulary entry as permanently ignored (trainer skips it)."""
+    """Пометить слово как игнорируемое (тренер его пропускает)."""
     src = (src_filter or "").upper()
     if src not in ("EN", "DA"):
-        return {"type": "ignore", "error": f"Unsupported src_filter={src_filter}"}
+        return {
+            "type": "ignore",
+            "error": f"Unsupported src_filter={src_filter}",
+        }
 
-    path = f"{dict_base_path}_{src.lower()}.json"
-    data = load_dict(path)
+    conn = get_conn(dict_base_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE entries
+        SET ignore = 1
+        WHERE term = ?
+          AND src_lang = ?
+        """,
+        (word, src),
+    )
+    changed = cur.rowcount
+    conn.commit()
 
-    if word not in data:
-        return {"type": "ignore", "error": f"Word '{word}' not found in {path}"}
+    if changed == 0:
+        return {
+            "type": "ignore",
+            "error": f"Word '{word}' not found for src_lang={src}",
+        }
 
-    entry = data[word]
-    entry["ignore"] = True
-    save_dict(path, data)
-
-    return {"type": "ignore", "word": word, "src_lang": src, "ignore": True, "error": None}
+    return {
+        "type": "ignore",
+        "word": word,
+        "src_lang": src,
+        "ignore": True,
+        "error": None,
+    }
 
 def mark_hard(dict_base_path: str, src_filter: str, word: str):
-    """Mark word as difficult by incrementing 'hard' counter."""
+    """Увеличить 'hard' для слова (оно считается более сложным)."""
     src = (src_filter or "").upper()
     if src not in ("EN", "DA"):
-        return {"type": "mark_hard", "error": f"Unsupported src_filter={src_filter}"}
+        return {
+            "type": "mark_hard",
+            "error": f"Unsupported src_filter={src_filter}",
+        }
 
-    path = f"{dict_base_path}_{src.lower()}.json"
-    data = load_dict(path)
+    conn = get_conn(dict_base_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE entries
+        SET hard = hard + 1
+        WHERE term = ?
+          AND src_lang = ?
+        """,
+        (word, src),
+    )
+    if cur.rowcount == 0:
+        conn.commit()
+        return {
+            "type": "mark_hard",
+            "error": f"Word '{word}' not found for src_lang={src}",
+        }
 
-    if word not in data:
-        return {"type": "mark_hard", "error": f"Word '{word}' not found in {path}"}
+    # Получим новое значение
+    cur.execute(
+        """
+        SELECT hard
+        FROM entries
+        WHERE term = ?
+          AND src_lang = ?
+        """,
+        (word, src),
+    )
+    row = cur.fetchone()
+    conn.commit()
 
-    entry = data[word]
-    entry["hard"] = entry.get("hard", 0) + 1
-    save_dict(path, data)
-
-    return {"type": "mark_hard", "word": word, "src_lang": src, "hard": entry["hard"], "error": None}
+    return {
+        "type": "mark_hard",
+        "word": word,
+        "src_lang": src,
+        "hard": row["hard"] if row else None,
+        "error": None,
+    }
 
 def deepl_call(text: str, target_lang: str):
     """Perform a DeepL API call."""
@@ -246,81 +425,101 @@ def normalize_src_lang(detected: str, src_hint: str) -> str:
         return hint
     return "EN"
 
-def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: str = ""):
-    """Full async word translation with caching and training counters."""
-    key = word
-    src_langs = ["EN", "DA"]
-    dicts = {}
+def translate_word(
+    word: str,
+    dict_base_path: str,
+    target_lang: str,
+    src_hint: str = "",
+):
+    """
+    Translation of a single word with caching in SQLite and repetition counters.
+    """
+    target_lang = (target_lang or "RU").upper()
+    conn = get_conn(dict_base_path)
+    now = now_str()
 
-    # Try both dictionaries first
-    for src in src_langs:
-        path = f"{dict_base_path}_{src.lower()}.json"
-        data = load_dict(path)
-        dicts[src] = (path, data)
+    # 1) Try to retrieve from the database (any src_lang, but the required dst_lang)
+    row = db_get_entry_any_src(conn, word, target_lang)
+    if row is not None:
+        db_touch_usage(conn, row["id"], now)
+        return {
+            "type": "word",
+            "source": word,
+            "text": row["translation"],
+            "target_lang": row["dst_lang"],
+            "detected_source_lang": row["src_lang"],
+            "from_cache": True,
+            "timestamp": row["created_at"],
+            "last_used": now,
+            "count": row["count"] + 1,      # we have just increased
+            "error": None,
+        }
 
-        if key in data:
-            entry = data[key]
-            now = now_str()
-            entry.setdefault("date", now)
-            entry["last_used"] = now
-            entry["count"] = entry.get("count", 0) + 1
-            entry.setdefault("lang", target_lang)
-            entry.setdefault("src_lang", src)
-            save_dict(path, data)
-
-            return {
-                "type": "word",
-                "source": word,
-                "text": entry.get("text", "N/A"),
-                "target_lang": target_lang,
-                "detected_source_lang": entry.get("src_lang", src),
-                "from_cache": True,
-                "timestamp": entry.get("date", ""),
-                "last_used": entry.get("last_used", ""),
-                "count": entry.get("count", 0),
-                "error": None,
-            }
-
-    # Not in cache: ask DeepL
+    # 2) If it is not in the database, we refer to DeepL.
     tr, detected, err = deepl_call(word, target_lang)
     if err:
-        return {"type": "word", "source": word, "text": "", "target_lang": target_lang,
-                "detected_source_lang": "", "from_cache": False, "timestamp": "", "error": err}
+        return {
+            "type": "word",
+            "source": word,
+            "text": "",
+            "target_lang": target_lang,
+            "detected_source_lang": "",
+            "from_cache": False,
+            "timestamp": "",
+            "last_used": "",
+            "count": 0,
+            "error": err,
+        }
 
     src = normalize_src_lang(detected, src_hint)
-    path, data = dicts.get(src, (f"{dict_base_path}_{src.lower()}.json", None))
-    if data is None:
-        data = load_dict(path)
+    db_upsert_entry(conn, word, tr, src, target_lang, detected, now)
 
-    now = now_str()
-    data[key] = {
+    return {
+        "type": "word",
+        "source": word,
         "text": tr,
-        "date": now,
+        "target_lang": target_lang,
+        "detected_source_lang": src,
+        "from_cache": False,
+        "timestamp": now,
         "last_used": now,
         "count": 1,
-        "lang": target_lang,
-        "src_lang": src,
-        "detected_raw": detected,
+        "error": None,
     }
-    save_dict(path, data)
 
-    return {"type": "word", "source": word, "text": tr, "target_lang": target_lang,
-            "detected_source_lang": src, "from_cache": False, "timestamp": now,
-            "last_used": now, "count": 1, "error": None}
+def translate_selection(
+    text: str,
+    dict_base_path: str,
+    target_lang: str,
+    src_hint: str = "",
+):
+    """
+    Translation of any text fragment (4+ words and more).
+    No dictionary/SQLite is used here – we simply proxy DeepL.
+    """
+    target_lang = (target_lang or "RU").upper()
 
-def translate_selection(text: str, target_lang: str):
-    """Translate a multi-word text block without caching."""
-    text_clean = oneline(text)
-    tr, detected, err = deepl_call(text_clean, target_lang)
+    tr, detected, err = deepl_call(text, target_lang)
     if err:
-        return {"type": "selection", "source": text_clean, "text": "",
-                "target_lang": target_lang, "detected_source_lang": detected,
-                "timestamp": "", "error": err}
+        return {
+            "type": "selection",
+            "source": text,
+            "text": "",
+            "target_lang": target_lang,
+            "detected_source_lang": "",
+            "error": err,
+        }
 
-    now = now_str()
-    return {"type": "selection", "source": text_clean, "text": oneline(tr),
-            "target_lang": target_lang, "detected_source_lang": detected,
-            "timestamp": now, "error": None}
+    src = normalize_src_lang(detected, src_hint)
+
+    return {
+        "type": "selection",
+            "source": text,
+            "text": tr,
+            "target_lang": target_lang,
+            "detected_source_lang": src,
+            "error": None,
+    }
 
 def main():
     """CLI entry point called asynchronously from Vim."""
@@ -341,8 +540,15 @@ def main():
         result = translate_word(text, dict_base_path, target_lang, src_hint)
 
     elif mode == "selection":
-        target_lang = sys.argv[3] if len(sys.argv) >= 4 else "RU"
-        result = translate_selection(text, target_lang)
+    # python3 deepl_helper.py selection "long text" ~/.local/.../dict RU EN
+        if len(sys.argv) < 4:
+            raise ValueError("selection mode: not enough arguments")
+        text = sys.argv[2]
+        dict_base = sys.argv[3]
+        target = sys.argv[4] if len(sys.argv) > 4 else "RU"
+        src_hint = sys.argv[5] if len(sys.argv) > 5 else ""
+        result = translate_selection(text, dict_base, target, src_hint)
+
 
     elif mode == "train":
         dict_base_path = text
