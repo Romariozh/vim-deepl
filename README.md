@@ -34,6 +34,42 @@ Requires:
 
 Using **vim-plug**:
 
-```vim
+'''vim'''
 Plug 'Romariozh/vim-deepl'
+
+## Architecture Overview
+
+                ┌────────────────────────┐
+                │        Vim Editor      │
+                │  (vim-deepl plugin)    │
+                └─────────────┬──────────┘
+                              │
+                              │ HTTP (curl + job_start)
+                              ▼
+                ┌────────────────────────┐
+                │     FastAPI Backend    │
+                │       (dict_api.py)    │
+                └─────────────┬──────────┘
+                              │
+                              │ Python function calls
+                              ▼
+                ┌────────────────────────┐
+                │    Dictionary Engine   │
+                │   (deepl_helper.py)    │
+                └─────────────┬──────────┘
+                              │
+                              │ SQL (sqlite3)
+                              ▼
+                ┌────────────────────────┐
+                │       vocab.db         │
+                │   (SQLite dictionary)  │
+                └────────────────────────┘
+
+### Flow Summary
+
+1. Vim sends translation/training requests via HTTP
+2. FastAPI receives request and dispatches to Python logic
+3. `deepl_helper.py` reads/writes entries in `vocab.db`
+4. SQLite stores translations, usage stats, training metadata
+5. Vim displays results in popup or translation window
 
