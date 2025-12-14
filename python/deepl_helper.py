@@ -10,8 +10,11 @@ import sqlite3
 import urllib.request
 import urllib.parse
 import random
+import hashlib
 from datetime import datetime
 
+MW_SD3_ENDPOINT = "https://www.dictionaryapi.com/api/v3/references/sd3/json/"
+MW_SD3_ENV_VAR = "MW_SD3_API_KEY"
 
 def load_dict(path: str):
     """Load a JSON dictionary file. Return empty dict if missing or broken."""
@@ -97,8 +100,56 @@ def init_db(conn: sqlite3.Connection) -> None:
             ON entries(src_lang, ignore)
         """
     )
-    conn.commit()
 
+    # --- Merriam-Webster definitions table (per term, per src_lang) ---
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mw_definitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            term TEXT NOT NULL,
+            src_lang TEXT NOT NULL,        -- "EN" for now
+            defs_noun TEXT,                -- JSON list of strings
+            defs_verb TEXT,
+            defs_adj TEXT,
+            defs_adv TEXT,
+            defs_other TEXT,
+            raw_json TEXT,                 -- raw MW JSON (for debugging / future use)
+            created_at TEXT NOT NULL,
+            UNIQUE(term, src_lang)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_mw_def_term_src
+        ON mw_definitions(term, src_lang)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS entries_ctx (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            term         TEXT NOT NULL,
+            translation  TEXT NOT NULL,
+            src_lang     TEXT NOT NULL,
+            dst_lang     TEXT NOT NULL,
+            ctx_hash     TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            last_used    TEXT,
+            count        INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(term, src_lang, dst_lang, ctx_hash)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_entries_ctx_lookup
+        ON entries_ctx(term, src_lang, dst_lang, ctx_hash)
+        """
+    )
+
+    conn.commit()
 
 def db_get_entry_any_src(
     conn: sqlite3.Connection,
@@ -151,6 +202,61 @@ def db_upsert_entry(
     )
     conn.commit()
 
+def ctx_hash(context: str) -> str:
+    ctx = (context or "").strip()
+    return hashlib.sha256(ctx.encode("utf-8")).hexdigest()
+
+
+def db_get_entry_ctx(conn: sqlite3.Connection, term: str, src_lang: str, dst_lang: str, h: str):
+    row = conn.execute(
+        """
+        SELECT term, translation, src_lang, dst_lang, created_at, last_used, count
+        FROM entries_ctx
+        WHERE term=? AND src_lang=? AND dst_lang=? AND ctx_hash=?
+        """,
+        (term, src_lang, dst_lang, h),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "term": row[0],
+        "translation": row[1],
+        "src_lang": row[2],
+        "dst_lang": row[3],
+        "created_at": row[4],
+        "last_used": row[5],
+        "count": row[6],
+    }
+
+
+def db_upsert_entry_ctx(conn: sqlite3.Connection, term: str, translation: str, src_lang: str, dst_lang: str, h: str):
+    now = now_str()
+    conn.execute(
+        """
+        INSERT INTO entries_ctx(term, translation, src_lang, dst_lang, ctx_hash, created_at, last_used, count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(term, src_lang, dst_lang, ctx_hash)
+        DO UPDATE SET
+            translation = excluded.translation,
+            last_used   = excluded.last_used,
+            count       = entries_ctx.count + 1
+        """,
+        (term, translation, src_lang, dst_lang, h, now, now),
+    )
+    conn.commit()
+
+
+def db_touch_usage_ctx(conn: sqlite3.Connection, term: str, src_lang: str, dst_lang: str, h: str):
+    now = now_str()
+    conn.execute(
+        """
+        UPDATE entries_ctx
+        SET last_used=?, count=count+1
+        WHERE term=? AND src_lang=? AND dst_lang=? AND ctx_hash=?
+        """,
+        (now, term, src_lang, dst_lang, h),
+    )
+    conn.commit()
 
 def db_touch_usage(
     conn: sqlite3.Connection,
@@ -168,6 +274,193 @@ def db_touch_usage(
         (now_s, entry_id),
     )
     conn.commit()
+
+def db_get_mw_definitions(
+    conn: sqlite3.Connection,
+    term: str,
+    src_lang: str = "EN",
+) -> dict | None:
+    """Return MW definitions for term/src_lang from mw_definitions, or None."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT term, src_lang,
+               defs_noun, defs_verb, defs_adj, defs_adv, defs_other,
+               raw_json, created_at
+        FROM mw_definitions
+        WHERE term = ? AND src_lang = ?
+        """,
+        (term, src_lang),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+
+    def _load(s: str | None) -> list[str]:
+        if not s:
+            return []
+        try:
+            return json.loads(s)
+        except Exception:
+            return []
+
+    return {
+        "term": row["term"],
+        "src_lang": row["src_lang"],
+        "noun": _load(row["defs_noun"]),
+        "verb": _load(row["defs_verb"]),
+        "adjective": _load(row["defs_adj"]),
+        "adverb": _load(row["defs_adv"]),
+        "other": _load(row["defs_other"]),
+        "raw": row["raw_json"],  # raw JSON string
+        "created_at": row["created_at"],
+    }
+
+
+def db_upsert_mw_definitions(
+    conn: sqlite3.Connection,
+    term: str,
+    src_lang: str,
+    defs_by_pos: dict,
+    raw_json: str,
+    now_s: str,
+) -> None:
+    """Insert or update MW definitions for a term."""
+    # defs_by_pos keys: "noun", "verb", "adjective", "adverb", "other"
+    noun = json.dumps(defs_by_pos.get("noun", []), ensure_ascii=False)
+    verb = json.dumps(defs_by_pos.get("verb", []), ensure_ascii=False)
+    adj = json.dumps(defs_by_pos.get("adjective", []), ensure_ascii=False)
+    adv = json.dumps(defs_by_pos.get("adverb", []), ensure_ascii=False)
+    other = json.dumps(defs_by_pos.get("other", []), ensure_ascii=False)
+
+    conn.execute(
+        """
+        INSERT INTO mw_definitions (
+            term, src_lang,
+            defs_noun, defs_verb, defs_adj, defs_adv, defs_other,
+            raw_json, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(term, src_lang) DO UPDATE SET
+            defs_noun = excluded.defs_noun,
+            defs_verb = excluded.defs_verb,
+            defs_adj  = excluded.defs_adj,
+            defs_adv  = excluded.defs_adv,
+            defs_other = excluded.defs_other,
+            raw_json  = excluded.raw_json
+        """,
+        (term, src_lang, noun, verb, adj, adv, other, raw_json, now_s),
+    )
+    conn.commit()
+
+def mw_call(word: str):
+    """Call Merriam-Webster Intermediate (sd3) API for an English word.
+
+    Returns (data, error) where:
+      - data is parsed JSON (Python object) or None on error
+      - error is None or error message
+    """
+    api_key = os.environ.get(MW_SD3_ENV_VAR, "")
+    if not api_key:
+        return None, f"{MW_SD3_ENV_VAR} is not set."
+
+    url = MW_SD3_ENDPOINT + urllib.parse.quote(word) + f"?key={api_key}"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8")
+            data = json.loads(body)
+    except Exception as e:
+        return None, f"MW request error: {e}"
+
+    if not isinstance(data, list):
+        return None, "MW response is not a list."
+    return data, None
+
+def mw_extract_definitions(entries: list) -> dict:
+    """Group Merriam-Webster shortdef strings by part of speech.
+
+    Returns dict with keys: noun, verb, adjective, adverb, other.
+    """
+    result: dict[str, list[str]] = {
+        "noun": [],
+        "verb": [],
+        "adjective": [],
+        "adverb": [],
+        "other": [],
+    }
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        fl = (entry.get("fl") or "").lower()  # function label / part of speech
+        shortdefs = entry.get("shortdef") or []
+        if not isinstance(shortdefs, list):
+            continue
+
+        # Decide bucket
+        if fl == "noun":
+            bucket = "noun"
+        elif fl == "verb":
+            bucket = "verb"
+        elif fl in ("adjective", "adj."):
+            bucket = "adjective"
+        elif fl in ("adverb", "adv."):
+            bucket = "adverb"
+        else:
+            bucket = "other"
+
+        for d in shortdefs:
+            if isinstance(d, str) and d.strip():
+                result[bucket].append(d.strip())
+
+    return result
+
+def ensure_mw_definitions(
+    conn: sqlite3.Connection,
+    term: str,
+    src_lang: str,
+) -> dict | None:
+    """Get MW definitions from DB if present, otherwise fetch from API and store.
+
+    Returns dict like mw_extract_definitions(), or None on error.
+    """
+    src_lang = (src_lang or "").upper()
+    if src_lang != "EN":
+        return None  # MW only for English source words
+
+    # 1) Check cache
+    cached = db_get_mw_definitions(conn, term, src_lang)
+    if cached:
+        return {
+            "noun": cached["noun"],
+            "verb": cached["verb"],
+            "adjective": cached["adjective"],
+            "adverb": cached["adverb"],
+            "other": cached["other"],
+        }
+
+    # 2) Call API
+    data, err = mw_call(term)
+    if err or not data:
+        return None
+
+    data, err = mw_call(term)
+    if err or not data:
+    # временный дебаг
+        print(f"[MW DEBUG] term={term!r} err={err!r}", file=sys.stderr)
+        return None
+
+
+    defs_by_pos = mw_extract_definitions(data)
+    # If everything is empty, don't store
+    if not any(defs_by_pos.values()):
+        return None
+
+    now = now_str()
+    raw_json = json.dumps(data, ensure_ascii=False)
+    db_upsert_mw_definitions(conn, term, src_lang, defs_by_pos, raw_json, now)
+    return defs_by_pos
 
 def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     """
@@ -380,15 +673,25 @@ def mark_hard(dict_base_path: str, src_filter: str, word: str):
         "error": None,
     }
 
-def deepl_call(text: str, target_lang: str):
+
+def deepl_call(text: str, target_lang: str, context: str = ""):
     """Perform a DeepL API call."""
     api_key = os.environ.get("DEEPL_API_KEY", "")
     if not api_key:
         return None, "", "DEEPL_API_KEY is not set."
 
     url = "https://api-free.deepl.com/v2/translate"
-    params = {"auth_key": api_key, "text": text, "target_lang": target_lang}
+    params = {
+    "auth_key": api_key,
+    "text": text,
+    "target_lang": target_lang,
+    }
+
+    if context:
+        params["context"] = context
+
     data = urllib.parse.urlencode(params).encode("utf-8")
+
     req = urllib.request.Request(url, data=data, method="POST")
 
     try:
@@ -430,33 +733,125 @@ def translate_word(
     dict_base_path: str,
     target_lang: str,
     src_hint: str = "",
+    context: str = "",
 ):
-    """
-    Translation of a single word with caching in SQLite and repetition counters.
-    """
+    """Translation of a single word with caching in SQLite and repetition counters."""
     target_lang = (target_lang or "RU").upper()
+
     conn = get_conn(dict_base_path)
     now = now_str()
 
-    # 1) Try to retrieve from the database (any src_lang, but the required dst_lang)
+    # --- debug/meta flags ---
+    ctx = (context or "").strip()
+    context_used = bool(ctx)
+    cache_source = None  # "context" | "base" | None
+
+    # ------------------------------------------------------------
+    # 1) CONTEXT MODE (separate cache: entries_ctx)
+    # ------------------------------------------------------------
+    if ctx:
+        src_expected = (src_hint or "").upper() or "EN"
+        h = ctx_hash(ctx)
+
+        cached = db_get_entry_ctx(conn, word, src_expected, target_lang, h)
+        if cached:
+            # update usage counter in context cache
+            db_touch_usage_ctx(conn, word, src_expected, target_lang, h)
+
+            mw_defs = None
+            if cached["src_lang"] == "EN":
+                mw_defs = ensure_mw_definitions(conn, word, cached["src_lang"])
+
+            return {
+                "type": "word",
+                "source": word,
+                "text": cached["translation"],
+                "target_lang": target_lang,
+                "detected_source_lang": cached["src_lang"],
+                "from_cache": True,
+                "timestamp": cached["created_at"],
+                "last_used": now,
+                "count": cached["count"] + 1,
+                "error": None,
+                "mw_definitions": mw_defs,
+                "context_used": True,
+                "cache_source": "context",
+            }
+
+        # not in context cache -> call DeepL with context
+        tr, detected, err = deepl_call(word, target_lang, context=ctx)
+        if err:
+            return {
+                "type": "word",
+                "source": word,
+                "text": "",
+                "target_lang": target_lang,
+                "detected_source_lang": "",
+                "from_cache": False,
+                "timestamp": now,
+                "last_used": now,
+                "count": 0,
+                "error": err,
+                "mw_definitions": None,
+                "context_used": True,
+                "cache_source": None,
+            }
+
+        # normalize detected source
+        src = normalize_src_lang(detected, src_hint)
+
+        # store ONLY in context cache (do not touch base entries)
+        db_upsert_entry_ctx(conn, word, tr, src, target_lang, h)
+
+        mw_defs = None
+        if src == "EN":
+            mw_defs = ensure_mw_definitions(conn, word, src)
+
+        return {
+            "type": "word",
+            "source": word,
+            "text": tr,
+            "target_lang": target_lang,
+            "detected_source_lang": src,
+            "from_cache": False,
+            "timestamp": now,
+            "last_used": now,
+            "count": 1,
+            "error": None,
+            "mw_definitions": mw_defs,
+            "context_used": True,
+            "cache_source": None,
+        }
+
+    # ------------------------------------------------------------
+    # 2) BASE MODE (original cache: entries)
+    # ------------------------------------------------------------
     row = db_get_entry_any_src(conn, word, target_lang)
     if row is not None:
         db_touch_usage(conn, row["id"], now)
+
+        mw_defs = None
+        if row["src_lang"] == "EN":
+            mw_defs = ensure_mw_definitions(conn, word, row["src_lang"])
+
         return {
             "type": "word",
             "source": word,
             "text": row["translation"],
-            "target_lang": row["dst_lang"],
+            "target_lang": target_lang,
             "detected_source_lang": row["src_lang"],
             "from_cache": True,
             "timestamp": row["created_at"],
             "last_used": now,
-            "count": row["count"] + 1,      # we have just increased
+            "count": row["count"] + 1,
             "error": None,
+            "mw_definitions": mw_defs,
+            "context_used": False,
+            "cache_source": "base",
         }
 
-    # 2) If it is not in the database, we refer to DeepL.
-    tr, detected, err = deepl_call(word, target_lang)
+    # fallback: call DeepL (no context)
+    tr, detected, err = deepl_call(word, target_lang, context="")
     if err:
         return {
             "type": "word",
@@ -465,14 +860,23 @@ def translate_word(
             "target_lang": target_lang,
             "detected_source_lang": "",
             "from_cache": False,
-            "timestamp": "",
-            "last_used": "",
+            "timestamp": now,
+            "last_used": now,
             "count": 0,
             "error": err,
+            "mw_definitions": None,
+            "context_used": False,
+            "cache_source": None,
         }
 
     src = normalize_src_lang(detected, src_hint)
+
+    # store in base cache
     db_upsert_entry(conn, word, tr, src, target_lang, detected, now)
+
+    mw_defs = None
+    if src == "EN":
+        mw_defs = ensure_mw_definitions(conn, word, src)
 
     return {
         "type": "word",
@@ -485,6 +889,9 @@ def translate_word(
         "last_used": now,
         "count": 1,
         "error": None,
+        "mw_definitions": mw_defs,
+        "context_used": False,
+        "cache_source": None,
     }
 
 def translate_selection(

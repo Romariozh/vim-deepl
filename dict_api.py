@@ -39,6 +39,7 @@ class WordRequest(BaseModel):
     term: str
     target_lang: str
     src_hint: Optional[str] = ""
+    context: Optional[str] = None
 
 class TrainRequest(BaseModel):
     src_filter: Optional[str] = None
@@ -120,6 +121,7 @@ def api_translate_word(payload: WordRequest):
         DICT_BASE,
         payload.target_lang,
         payload.src_hint or "",
+        payload.context or "",
     )
     return result
 
