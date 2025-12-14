@@ -62,6 +62,26 @@ function! deepl#cycle_target_lang() abort
 endfunction
 
 " -------------------------------------------------------
+"  The single access to target/src_hint
+function! deepl#TargetLang() abort
+  return get(g:, 'deepl_target_lang', 'RU')
+endfunction
+
+function! deepl#SrcHint() abort
+  return get(g:, 'deepl_word_src_lang', '')
+endfunction
+
+" -------------------------------------------------------
+"
+function! s:deepl_payload_word(term) abort
+  return json_encode({
+        \ 'term': a:term,
+        \ 'target_lang': deepl#TargetLang(),
+        \ 'src_hint': deepl#SrcHint(),
+        \ })
+endfunction
+
+" -------------------------------------------------------
 " Popup helper for word translations
 if has('popupwin')
   function! s:DeepLShowPopup(msg) abort
@@ -106,7 +126,8 @@ function! deepl#cycle_word_src_lang() abort
   else
     let g:deepl_word_src_lang = l:list[(l:idx + 1) % len(l:list)]
   endif
-  echo "DeepL WORD src = " . g:deepl_word_src_lang . " → RU"
+  echo "DeepL WORD src = " . g:deepl_word_src_lang 
+
 endfunction
 
 " -------------------------------------------------------
@@ -201,7 +222,7 @@ function! DeepLTrainerRender(show_translation) abort
   let l:word  = get(l:res, 'word', '')
   let l:tr    = get(l:res, 'translation', '')
   let l:src   = get(l:res, 'src_lang', '')
-  let l:lang  = get(l:res, 'target_lang', 'RU')
+  let l:lang  = get(l:res, 'target_lang', deepl#TargetLang())
   let l:count = get(l:res, 'count', 0)
   let l:hard  = get(l:res, 'hard', 0)
 
@@ -430,14 +451,14 @@ function! deepl#trainer_start() abort
     return
   endif
 
-  " Open trainer window at the bottom with fixed height 7
-  botright 7split __DeepL_Trainer__
+  " Open trainer window at the bottom with fixed height 8
+  botright 8split __DeepL_Trainer__
   let g:deepl_trainer_bufnr = bufnr('%')
 
   setlocal buftype=nofile bufhidden=wipe noswapfile nobuflisted
   setlocal wrap linebreak
   setlocal nonumber norelativenumber
-  setlocal winfixheight          " <=== fix height at 7 lines
+  setlocal winfixheight          " <=== fix height at 8 lines
 
   setlocal modifiable
 
@@ -515,6 +536,53 @@ function! s:DeepLWordExit(channel, status) abort
 endfunction
 
 " -------------------------------------------------------
+function! s:deepl_sentence_context() abort
+  let l:line = getline('.')
+  if empty(l:line)
+    return ''
+  endif
+
+  let l:col = col('.') - 1
+  if l:col < 0
+    let l:col = 0
+  endif
+
+  " Sentence boundaries (left side) by literal chars: . ! ? : ;
+  let l:prefix = strpart(l:line, 0, l:col)
+
+  let l:left_dot = strridx(l:prefix, '.')
+  let l:left_exc = strridx(l:prefix, '!')
+  let l:left_q   = strridx(l:prefix, '?')
+  let l:left_col = strridx(l:prefix, ':')
+  let l:left_sem = strridx(l:prefix, ';')
+
+  let l:start = max([l:left_dot, l:left_exc, l:left_q, l:left_col, l:left_sem]) + 1
+
+  " Sentence boundaries (right side) using match() patterns.
+  " IMPORTANT: '?' must be escaped as '\?' in Vim regex.
+  let l:end = -1
+  " IMPORTANT: use literal '?' (NOT '\?') because '\?' is a quantifier in Vim regex.
+  for l:pat in ['\.', '!', '?', ':', ';']
+    let l:p = match(l:line, l:pat, l:col)
+    if l:p != -1 && (l:end == -1 || l:p < l:end)
+      let l:end = l:p
+    endif
+  endfor
+
+  if l:end == -1
+    let l:sent = strpart(l:line, l:start)
+  else
+    let l:sent = strpart(l:line, l:start, (l:end - l:start + 1))
+  endif
+
+  let l:sent = trim(l:sent)
+  if strchars(l:sent) > 400
+    let l:sent = strcharpart(l:sent, 0, 400)
+  endif
+
+  return l:sent
+endfunction
+" -------------------------------------------------------
 "  HTTP POST
 function! deepl#HttpPost(path, payload) abort
   let l:url = g:deepl_api_base . a:path
@@ -528,20 +596,270 @@ function! deepl#HttpPost(path, payload) abort
 endfunction
 
 " -------------------------------------------------------
-function! deepl#translate_word()  abort
+" HTTP helper: POST JSON and return decoded JSON dict.
+function! s:http_post_json(url, payload_dict) abort
+  let l:payload = json_encode(a:payload_dict)
+
+  " NOTE: system() expects a String command (not a List) in many Vim builds.
+  let l:cmd =
+        \ 'curl -sS -X POST ' .
+        \ '-H ' . shellescape('Content-Type: application/json') . ' ' .
+        \ '-d ' . shellescape(l:payload) . ' ' .
+        \ shellescape(a:url)
+
+  let l:out = system(l:cmd)
+  if v:shell_error != 0
+    throw 'curl failed: ' . l:out
+  endif
+
+  try
+    return json_decode(l:out)
+  catch
+    throw 'json_decode failed: ' . l:out
+  endtry
+endfunction
+" -------------------------------------------------------
+" Show Merriam-Webster definitions for the word under cursor (if available).
+function! deepl#show_defs() abort
   let l:word = expand('<cword>')
   if empty(l:word)
     echo "No word under cursor"
     return
   endif
-  call DeepLTranslateUnit(l:word)
-endfunction
 
+  " This feature needs HTTP backend because we query FastAPI for mw_definitions.
+  if get(g:, 'deepl_backend', '') !=# 'http'
+    echo "Definitions popup requires g:deepl_backend='http'"
+    return
+  endif
+
+  if empty(get(g:, 'deepl_api_base', ''))
+    echo "Error: g:deepl_api_base is not set"
+    return
+  endif
+  let l:url = g:deepl_api_base . '/translate/word'
+
+  " Keep consistent with the current DeepL settings.
+  let l:target   = deepl#TargetLang()
+  let l:src_hint = get(g:, 'deepl_word_src_lang', '')
+
+  " Use sentence under cursor as context (same idea as <F2> word translate).
+  let l:ctx = ''
+  try
+    let l:ctx = s:deepl_sentence_context()
+  catch
+    let l:ctx = ''
+  endtry
+
+  let l:payload = {
+        \ 'term': l:word,
+        \ 'target_lang': l:target,
+        \ 'src_hint': l:src_hint,
+        \ 'context': l:ctx,
+        \ }
+
+  try
+    let l:resp = s:http_post_json(l:url, l:payload)
+  catch
+    echo "deepl#show_defs: backend request failed"
+    return
+  endtry
+
+  " FastAPI returns mw_definitions either as dict or null.
+  if !has_key(l:resp, 'mw_definitions') || type(l:resp.mw_definitions) != v:t_dict
+    echo "No MW definitions for: " . l:word
+    return
+  endif
+
+  " Prefer server-provided 'source' (canonical token) over expand('<cword>').
+  let l:source      = get(l:resp, 'source', l:word)
+  let l:translation = get(l:resp, 'text', '')
+
+  " Determine whether context was actually used.
+  let l:ctx_used = get(l:resp, 'context_used', v:false)
+
+  " Determine source label.
+  let l:from_cache   = get(l:resp, 'from_cache', v:false)
+let l:cache_source = get(l:resp, 'cache_source', '')
+
+" Source label:
+" - from_cache=true  -> Dictionary (SQLite)
+" - from_cache=false -> DeepL API (fresh request)
+let l:src_label = l:from_cache ? 'Dictionary' : 'DeepL API'
+
+  " Build right-side tag: SRC + optional CTX
+  let l:src_tag = 'SRC: ' . l:src_label
+  if l:ctx_used
+    let l:src_tag .= ' | CTX'
+  endif
+
+  " Left side header: "word → translation"
+  let l:left = empty(l:translation) ? l:source : (l:source . ' → ' . l:translation)
+
+  " Single header line: hard right-align src_tag to popup width
+  let l:width = get(g:, 'deepl_mw_popup_width', 80)
+
+  " Always keep at least 1 space between left and right parts
+  let l:space = l:width - strdisplaywidth(l:left) - strdisplaywidth(l:src_tag)
+  if l:space < 1
+    let l:space = 1
+  endif
+
+  let l:header_line = l:left . repeat(' ', l:space) . l:src_tag
+
+  " Build popup lines
+  let l:mw = l:resp.mw_definitions
+  let l:lines = [l:header_line, '']
+
+  let l:sections = ['verb', 'noun', 'adjective', 'adverb', 'other']
+  for l:sec in l:sections
+    let l:defs = get(l:mw, l:sec, [])
+    if type(l:defs) == type([]) && len(l:defs) > 0
+      call add(l:lines, toupper(l:sec) . ':')
+      for l:d in l:defs
+        call add(l:lines, '• ' . l:d)
+      endfor
+      call add(l:lines, '')
+    endif
+  endfor
+
+  if len(l:lines) <= 2
+    call add(l:lines, '(no MW definitions)')
+  endif
+
+  call s:deepl_show_defs_buffer(l:lines, '-  MW  -')
+endfunction
+" -------------------------------------------------------
+" Internal helper: show list of lines in a popup or preview window
+function! s:deepl_show_defs_buffer(lines, title) abort
+  if has('popupwin')
+    let width  = get(g:, 'deepl_mw_popup_width', 80)
+    let height = len(a:lines) > 20 ? 20 : len(a:lines)
+
+    let l:opts = {
+          \ 'title': a:title,
+          \ 'minwidth': width,
+          \ 'maxwidth': width,
+          \ 'minheight': height,
+          \ 'maxheight': height,
+          \ 'padding': [0, 1, 0, 1],
+          \ 'border': [1, 1, 1, 1],
+          \ 'borderchars': ['-','|','-','|','+','+','+','+'],
+          \ 'borderhighlight': ['Comment'],
+          \ 'highlight': 'Pmenu',
+          \ 'wrap': v:true,
+          \ 'mapping': v:true,
+          \ 'filter': function('s:deepl_popup_filter'),
+          \ 'shadow': 1,
+          \ 'shadowhighlight': 'Pmenu',
+          \ 'line': (&lines / 2) - (height / 2),
+          \ 'col':  (&columns / 2) - (width  / 2),
+          \ }
+
+    let l:popup_id = popup_create(a:lines, l:opts)
+    " Word-wrap (do not break words in the middle when possible)
+    call win_execute(l:popup_id, 'setlocal linebreak')
+    call win_execute(l:popup_id, 'setlocal breakat=\ \	.,;:!?)]}''"')
+    call win_execute(l:popup_id, 'setlocal showbreak=↳\ ')
+    call s:deepl_defs_popup_apply_hl(l:popup_id)
+    return
+  endif
+
+  " fallback — preview window, если popupwin нет
+  pclose
+  belowright pedit MW-Definitions
+  setlocal buftype=nofile bufhidden=wipe nobuflisted noswapfile
+  setlocal modifiable
+  silent %delete _
+  call setline(1, a:lines)
+  setlocal nomodifiable
+  execute 'file [MW] '.a:title
+endfunction
+" -------------------------------------------------------
+function! s:deepl_defs_popup_apply_hl(popup_id) abort
+  let l:winid = a:popup_id
+
+  " Bold only the left part of the header line (before SRC:)
+  call win_execute(l:winid,
+        \ "silent! call matchadd('DeeplPopupHeaderLeft', '^\\zs.*\\ze\\s\\+SRC:', 10)")
+
+  " Source tag colors
+  call win_execute(l:winid,
+        \ "silent! call matchadd('DeeplPopupSrcDict', 'SRC: Dictionary\\(\\s\\|$\\).*', 20)")
+  call win_execute(l:winid,
+        \ "silent! call matchadd('DeeplPopupSrcApi',  'SRC: DeepL API\\(\\s\\|$\\).*', 20)")
+
+  " CTX marker highlight (only if present in text)
+  call win_execute(l:winid,
+        \ "silent! call matchadd('DeeplPopupCtx', '\\<CTX\\>', 30)")
+endfunction
+" -------------------------------------------------------
+function! s:popup_scroll(id, delta) abort
+  " Vim without these functions can't scroll popups
+  if !exists('*popup_getoptions') || !exists('*popup_setoptions')
+    return
+  endif
+
+  let l:opts = popup_getoptions(a:id)
+  let l:first = get(l:opts, 'firstline', 1)
+
+  let l:new_first = l:first + a:delta
+  if l:new_first < 1
+    let l:new_first = 1
+  endif
+
+  call popup_setoptions(a:id, {'firstline': l:new_first})
+endfunction
+" -------------------------------------------------------
+function! s:deepl_popup_filter(id, key) abort
+ 
+    if a:key ==# "\<Esc>"
+    call popup_close(a:id)
+    return ''
+  endif
+
+  if a:key ==# 'j' || a:key ==# "\<Down>" || a:key ==# "\<ScrollWheelDown>"
+    call s:popup_scroll(a:id, 1)
+    return ''
+  endif
+
+  if a:key ==# 'k' || a:key ==# "\<Up>" || a:key ==# "\<ScrollWheelUp>"
+    call s:popup_scroll(a:id, -1)
+    return ''
+  endif
+
+  return a:key
+endfunction
+" -------------------------------------------------------
+function! deepl#translate_word() abort
+  let l:word = expand('<cword>')
+  if empty(l:word)
+    echo "No word under cursor"
+    return
+  endif
+
+  " Use current DeepL target lang (your <S-F3> cycle)
+  let l:target = deepl#TargetLang()
+
+  " Source hint (EN/DA) for DeepL word mode (your <F3> switch)
+  let l:src_hint = get(g:, 'deepl_word_src_lang', '')
+
+  " Context sentence around cursor (must exist; see below)
+  let l:ctx = s:deepl_sentence_context()
+
+  call DeepLTranslateUnit(l:word, l:target, l:src_hint, l:ctx)
+endfunction
 " -------------------------------------------------------
 " Translate arbitrary unit (word or short phrase) and store it in dictionary.
-function! DeepLTranslateUnit(text) abort
+function! DeepLTranslateUnit(text, ...) abort
   " For python backend we still require DEEPL_API_KEY,
   " but HTTP backend does not need it inside Vim.
+  " Normalize input (unit) and optional args
+  let l:unit = a:text
+  let l:target   = (a:0 >= 1 && !empty(a:1)) ? a:1 : deepl#TargetLang()
+  let l:src_hint = (a:0 >= 2) ? a:2 : get(g:, 'deepl_word_src_lang', '')
+  let l:ctx      = (a:0 >= 3) ? a:3 : ''
+
   if g:deepl_backend !=# 'http' && empty(g:deepl_api_key)
     echo "Error: DEEPL_API_KEY is not set"
     return
@@ -564,9 +882,6 @@ function! DeepLTranslateUnit(text) abort
   endif
 
   let l:dict_base = g:deepl_dict_path_base    " ~/.vim_deepl_dict
-  let l:target    = 'RU'                      " learn only RU
-  let l:src_hint  = g:deepl_word_src_lang     " EN or DA
-
   let g:deepl_pending_word = ''
 
   " Build command depending on backend
@@ -576,6 +891,7 @@ function! DeepLTranslateUnit(text) abort
           \ 'term': l:unit,
           \ 'target_lang': l:target,
           \ 'src_hint': l:src_hint,
+          \ 'context': l:ctx,
           \ })
     let l:cmd = [
           \ 'curl', '-sS',
@@ -605,7 +921,6 @@ function! DeepLTranslateUnit(text) abort
         \ 'err_mode': 'raw',
         \ })
 endfunction
-
 " -------------------------------------------------------
 " Strip trailing punctuation for units (one char)
 function! s:DeepLCleanUnit(text) abort
@@ -614,7 +929,6 @@ function! s:DeepLCleanUnit(text) abort
   let l:unit = substitute(l:unit, '[.!?,:;…]\s*$', '', '')
   return l:unit
 endfunction
-
 " =======================================================
 " Async SELECTION translation → history window
 " =======================================================
@@ -696,11 +1010,7 @@ function! s:DeepLSelExit(channel, status) abort
   let g:deepl_request_counter += 1
   let l:index = g:deepl_request_counter
 
-  " Fallback if API didn’t send timestamp
-  if empty(l:ts)
-    let l:ts = strftime('%Y-%m-%d %H:%M:%S')
-  endif
-  
+
   " Normalize source/translation to a single logical line
   let l:src_clean = substitute(l:src, '\n', ' ', 'g')
   let l:src_clean = substitute(l:src_clean, '\s\+', ' ', 'g')
@@ -710,7 +1020,7 @@ function! s:DeepLSelExit(channel, status) abort
 
   " Form history entry (so it is still saved)
   let g:deepl_last_entry =
-        \ '#' . l:index . ' [' . l:ts . '] [' . l:lang_tag . "]\n"
+        \ '#' . l:index . ' [' . l:lang_tag . "]\n"
         \ . 'SRC: ' . l:src_clean . "\n"
         \ . 'TRN: ' . l:tr_clean . "\n"
 
@@ -761,8 +1071,8 @@ function! deepl#translate_from_visual() abort
 
   " Same target and src_hint logic as for single word translation
   let l:dict_base = g:deepl_dict_path_base    " ~/.vim_deepl_dict
-  let l:target    = 'RU'                      " learn only RU (your current logic)
-  let l:src_hint  = g:deepl_word_src_lang     " EN or DA
+  let l:target    = deepl#TargetLang()       
+  let l:src_hint  = deepl#SrcHint()           " EN or DA
 
   " Flatten newlines for safe CLI argument and word counting
   let l:clean = substitute(l:text, '\n', ' ', 'g')
@@ -835,7 +1145,7 @@ function! DeepLShowInWindow() abort
   let l:bufnr   = bufnr(l:bufname)
 
   " --- Open or reuse bottom window with height 5 lines ---
-  let l:win_height = 7 
+  let l:win_height = 8 
 
   if l:bufnr == -1
     " Buffer does not exist yet — create new split at the bottom
@@ -884,16 +1194,22 @@ function! DeepLShowInWindow() abort
   " Scroll to bottom, then move cursor to the header line of the last entry ("#N [...] [...]").
   " Go to end (latest entry at bottom)
   normal! G
-
-  " Move cursor to header line of the last entry
-  let l:pos = search('^#\d\+ ', 'bW')
-  if l:pos == 0
-    " If not found, keep cursor at bottom
-    normal! G
+  " Decide whether to show header (top) or end (bottom)
+  normal! G
+  let l:header_lnum = search('^#\d\+ ', 'bW')
+  if l:header_lnum > 0
+    let l:entry_len = line('$') - l:header_lnum + 1
+    " Если запись больше высоты окна - 1, показываем низ
+    if l:entry_len > (winheight(0) - 1)
+      normal! zb
+    else
+      call cursor(l:header_lnum, 1)
+      normal! zt
+    endif
   else
-    " Put header line at top of the window
-    normal! zt
-  endif 
+    normal! zb
+  endif
+
   " Restore focus to the original window (main text)
   if l:curwin > 0 && winnr() != l:curwin
     execute l:curwin . 'wincmd w'
@@ -934,5 +1250,11 @@ function! DeepLClearHistory() abort
 
   echo "DeepL history cleared"
 endfunction
+
+" Popup highlight groups (MW/word popup header tags)
+highlight default DeeplPopupSrcDict cterm=bold ctermfg=108 gui=bold
+highlight default DeeplPopupSrcApi  cterm=bold ctermfg=110 gui=bold
+highlight default DeeplPopupCtx     cterm=bold ctermfg=215 gui=bold
+highlight default DeeplPopupHeaderLeft cterm=bold gui=bold
 
 "===========================================================

@@ -28,6 +28,27 @@ if !exists('g:deepl_dict_path_base')
   let g:deepl_dict_path_base = expand('~/.local/share/vim-deepl/dict')
 endif
 
+" Подсветка направлений перевода в буфере логов
+augroup DeeplLogHighlights
+  autocmd!
+  autocmd BufWinEnter,BufEnter __DeepL_Translation__ call s:deepl_apply_log_highlights()
+augroup END
+
+function! s:deepl_apply_log_highlights() abort
+  if exists('b:deepl_log_hl_applied') && b:deepl_log_hl_applied
+    return
+  endif
+  let b:deepl_log_hl_applied = 1
+
+  highlight default DeeplHeader cterm=bold ctermfg=114 gui=bold
+
+  " TRN:
+  highlight default DeeplTRN cterm=bold ctermfg=223 gui=bold
+
+  call matchadd('DeeplHeader', '^#\d\+\s\+\[.\{-}\]$')
+
+  call matchadd('DeeplTRN', '^TRN:.*$')
+endfunction
 " === Key mappings ===
 " Normal: translate word under cursor
 nnoremap <silent> <F2>  :call deepl#translate_word()<CR>
@@ -38,6 +59,8 @@ vnoremap <silent> <F2>  y:call deepl#translate_from_visual()<CR>
 nnoremap <silent> <F3>  :call deepl#cycle_word_src_lang()<CR>
 " Cycle target language (RU/EN/DA/...)
 nnoremap <silent> <S-F3>  :call deepl#cycle_target_lang()<CR>
+" Show MW definitions for the word under the cursor
+nnoremap <silent> <leader>d :call deepl#show_defs()<CR>
 
 " Trainer command
 command! DeepLTrainerStart call deepl#trainer_start()
