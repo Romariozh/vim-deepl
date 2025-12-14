@@ -73,3 +73,8 @@ Plug 'Romariozh/vim-deepl'
 4. SQLite stores translations, usage stats, training metadata
 5. Vim displays results in popup or translation window
 
+### New features
+
+- Merriam-Webster definitions using **sd3 API endpoint**
+- SQLite tables for storing MW definitions by part of speech
+- DeepL word translation with **context support** for higher accuracy
