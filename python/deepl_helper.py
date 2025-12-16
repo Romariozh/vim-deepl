@@ -12,6 +12,14 @@ import urllib.parse
 import random
 import hashlib
 from datetime import datetime
+from vim_deepl.utils.config import load_config
+from vim_deepl.utils.logging import setup_logging
+from vim_deepl.transport.vim_stdio import run, _ok, _fail
+from vim_deepl.utils.logging import get_logger
+
+
+
+LOGGER = get_logger("deepl_helper")
 
 MW_SD3_ENDPOINT = "https://www.dictionaryapi.com/api/v3/references/sd3/json/"
 MW_SD3_ENV_VAR = "MW_SD3_API_KEY"
@@ -928,62 +936,78 @@ def translate_selection(
             "error": None,
     }
 
-def main():
-    """CLI entry point called asynchronously from Vim."""
-    if len(sys.argv) < 3:
-        print(json.dumps({"error": "Not enough arguments"}, ensure_ascii=False))
-        sys.exit(1)
+def _ok(data):
+    return {"ok": True, "data": data}
 
-    mode = sys.argv[1]
-    text = sys.argv[2]
+def _fail(message, code="ERROR", details=None):
+    err = {"code": code, "message": message}
+    if details is not None:
+        err["details"] = details
+    return {"ok": False, "error": err}
+
+def dispatch(argv):
+    """Business dispatcher: returns JSON-ready dict (ok:true/false)."""
+    if len(argv) < 3:
+        LOGGER.warning("Not enough arguments: argv=%s", argv)
+        return _fail("Not enough arguments", code="ARGS", details={"argv": argv})
+
+    mode = argv[1]
+    text = argv[2]
 
     if mode == "word":
-        if len(sys.argv) < 4:
-            print(json.dumps({"error": "Missing dict path"}, ensure_ascii=False))
-            sys.exit(1)
-        dict_base_path = sys.argv[3]
-        target_lang = sys.argv[4] if len(sys.argv) >= 5 else "RU"
-        src_hint = sys.argv[5] if len(sys.argv) >= 6 else ""
+        if len(argv) < 4:
+            LOGGER.warning("Missing dict path: argv=%s", argv)
+            return _fail("Missing dict path", code="ARGS", details={"argv": argv})
+
+        dict_base_path = argv[3]
+        target_lang = argv[4] if len(argv) >= 5 else "RU"
+        src_hint = argv[5] if len(argv) >= 6 else ""
         result = translate_word(text, dict_base_path, target_lang, src_hint)
+        return _ok(result)
 
     elif mode == "selection":
-    # python3 deepl_helper.py selection "long text" ~/.local/.../dict RU EN
-        if len(sys.argv) < 4:
-            raise ValueError("selection mode: not enough arguments")
-        text = sys.argv[2]
-        dict_base = sys.argv[3]
-        target = sys.argv[4] if len(sys.argv) > 4 else "RU"
-        src_hint = sys.argv[5] if len(sys.argv) > 5 else ""
-        result = translate_selection(text, dict_base, target, src_hint)
+        # python3 deepl_helper.py selection "long text" ~/.local/.../dict RU EN
+        if len(argv) < 4:
+            LOGGER.warning("selection mode: not enough arguments argv=%s", argv)
+            return _fail("selection mode: not enough arguments", code="ARGS", details={"argv": argv})
 
+        dict_base = argv[3]
+        target = argv[4] if len(argv) > 4 else "RU"
+        src_hint = argv[5] if len(argv) > 5 else ""
+        result = translate_selection(text, dict_base, target, src_hint)
+        return _ok(result)
 
     elif mode == "train":
         dict_base_path = text
-        src_filter = sys.argv[3] if len(sys.argv) >= 4 else ""
+        src_filter = argv[3] if len(argv) >= 4 else ""
         result = pick_training_word(dict_base_path, src_filter or None)
+        return _ok(result)
 
     elif mode == "mark_hard":
-        if len(sys.argv) < 5:
-            result = {"type": "mark_hard", "error": "Not enough arguments"}
-        else:
-            dict_base_path = text
-            src_filter = sys.argv[3]
-            word = sys.argv[4]
-            result = mark_hard(dict_base_path, src_filter, word)
+        if len(argv) < 5:
+            LOGGER.warning("mark_hard: not enough arguments argv=%s", argv)
+            return _fail("mark_hard: not enough arguments", code="ARGS", details={"argv": argv})
+
+        dict_base_path = text
+        src_filter = argv[3]
+        word = argv[4]
+        result = mark_hard(dict_base_path, src_filter, word)
+        return _ok(result)
 
     elif mode == "ignore":
-        if len(sys.argv) < 5:
-            result = {"type": "ignore", "error": "Not enough arguments"}
-        else:
-            dict_base_path = text
-            src_filter = sys.argv[3]
-            word = sys.argv[4]
-            result = mark_ignore(dict_base_path, src_filter, word)
+        if len(argv) < 5:
+            LOGGER.warning("ignore: not enough arguments argv=%s", argv)
+            return _fail("ignore: not enough arguments", code="ARGS", details={"argv": argv})
+
+        dict_base_path = text
+        src_filter = argv[3]
+        word = argv[4]
+        result = mark_ignore(dict_base_path, src_filter, word)
+        return _ok(result)
 
     else:
-        result = {"error": f"Unknown mode: {mode}"}
-
-    print(json.dumps(result, ensure_ascii=False))
+        LOGGER.warning("Unknown mode: %s argv=%s", mode, argv)
+        return _fail(f"Unknown mode: {mode}", code="ARGS", details={"argv": argv})
 
 if __name__ == "__main__":
-    main()
+    run(dispatch)
