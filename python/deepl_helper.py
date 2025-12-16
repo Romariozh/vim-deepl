@@ -12,12 +12,12 @@ import urllib.parse
 import random
 import hashlib
 from datetime import datetime
-from vim_deepl.utils.config import load_config
 from vim_deepl.utils.logging import setup_logging
-from vim_deepl.transport.vim_stdio import run, _ok, _fail
 from vim_deepl.utils.logging import get_logger
-
-
+from vim_deepl.utils.config import load_config
+from vim_deepl.transport.vim_stdio import run, _ok, _fail
+from vim_deepl.repos.sqlite_repo import SQLiteRepo
+from vim_deepl.repos.schema import ensure_schema
 
 LOGGER = get_logger("deepl_helper")
 
@@ -81,83 +81,8 @@ def get_conn(dict_base_path: str) -> sqlite3.Connection:
     init_db(conn)
     return conn
 
-
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create tables/indexes if they do not exist."""
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS entries (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            term         TEXT NOT NULL,
-            translation  TEXT NOT NULL,
-            src_lang     TEXT NOT NULL,
-            dst_lang     TEXT NOT NULL,
-            detected_raw TEXT,
-            created_at   TEXT NOT NULL,
-            last_used    TEXT,
-            count        INTEGER NOT NULL DEFAULT 0,
-            hard         INTEGER NOT NULL DEFAULT 0,
-            ignore       INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(term, src_lang, dst_lang)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_entries_src_ignore
-            ON entries(src_lang, ignore)
-        """
-    )
-
-    # --- Merriam-Webster definitions table (per term, per src_lang) ---
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS mw_definitions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            term TEXT NOT NULL,
-            src_lang TEXT NOT NULL,        -- "EN" for now
-            defs_noun TEXT,                -- JSON list of strings
-            defs_verb TEXT,
-            defs_adj TEXT,
-            defs_adv TEXT,
-            defs_other TEXT,
-            raw_json TEXT,                 -- raw MW JSON (for debugging / future use)
-            created_at TEXT NOT NULL,
-            UNIQUE(term, src_lang)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_mw_def_term_src
-        ON mw_definitions(term, src_lang)
-        """
-    )
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS entries_ctx (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            term         TEXT NOT NULL,
-            translation  TEXT NOT NULL,
-            src_lang     TEXT NOT NULL,
-            dst_lang     TEXT NOT NULL,
-            ctx_hash     TEXT NOT NULL,
-            created_at   TEXT NOT NULL,
-            last_used    TEXT,
-            count        INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(term, src_lang, dst_lang, ctx_hash)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_entries_ctx_lookup
-        ON entries_ctx(term, src_lang, dst_lang, ctx_hash)
-        """
-    )
-
-    conn.commit()
+    ensure_schema(conn)
 
 def db_get_entry_any_src(
     conn: sqlite3.Connection,
@@ -946,6 +871,13 @@ def _fail(message, code="ERROR", details=None):
     return {"ok": False, "error": err}
 
 def dispatch(argv):
+    cfg = load_config()
+    db = SQLiteRepo(cfg.db_path)
+
+    # ensure schema once per run (cheap, idempotent)
+    with db.tx() as conn:
+        ensure_schema(conn)
+
     """Business dispatcher: returns JSON-ready dict (ok:true/false)."""
     if len(argv) < 3:
         LOGGER.warning("Not enough arguments: argv=%s", argv)
