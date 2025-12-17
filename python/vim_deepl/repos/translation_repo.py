@@ -23,9 +23,8 @@ class TranslationRepo:
                 """
                 SELECT *
                 FROM entries
-                WHERE term = ?
-                  AND dst_lang = ?
-                  AND ignore = 0
+                WHERE trim(term) = trim(?) COLLATE NOCASE
+                AND upper(trim(dst_lang)) = upper(trim(?))
                 ORDER BY
                     COALESCE(last_used, created_at) DESC,
                     created_at DESC
@@ -164,7 +163,7 @@ class TranslationRepo:
                     return json.loads(x)
                 except Exception:
                     return x
-
+            """
             return {
                 "term": row["term"],
                 "src_lang": row["src_lang"],
@@ -176,6 +175,17 @@ class TranslationRepo:
                 "raw_json": row["raw_json"],
                 "created_at": row["created_at"],
             }
+            """
+            return {
+                "noun": _loads(row["defs_noun"]),
+                "verb": _loads(row["defs_verb"]),
+                "adjective": _loads(row["defs_adj"]),
+                "adverb": _loads(row["defs_adv"]),
+                "other": _loads(row["defs_other"]),
+                "raw_json": row["raw_json"],
+                "created_at": row["created_at"],
+            }
+
 
     def upsert_mw_definitions(self, term: str, src_lang: str, defs: dict, now_s: str) -> None:
         def _dumps(x: Any) -> Optional[str]:
@@ -206,8 +216,8 @@ class TranslationRepo:
                     src_lang,
                     _dumps(defs.get("noun")),
                     _dumps(defs.get("verb")),
-                    _dumps(defs.get("adj")),
-                    _dumps(defs.get("adv")),
+                    _dumps(defs.get("adjective")),
+                    _dumps(defs.get("adverb")),
                     _dumps(defs.get("other")),
                     defs.get("raw_json"),
                     now_s,
