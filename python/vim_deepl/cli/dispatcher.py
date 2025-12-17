@@ -119,8 +119,9 @@ def dispatch(argv: list[str]) -> dict:
         target_lang = argv[4] if len(argv) >= 5 else "RU"
         src_hint = argv[5] if len(argv) >= 6 else ""
         # context is optional; keep it if you already support it in CLI
-        # context = argv[6] if len(argv) >= 7 else ""
-        context = ""
+        context = argv[6] if len(argv) >= 7 else ""
+        #context = ""
+        log.info("WORD ctx_len=%s ctx=%r", len(context or ""), context)
 
         result = services.translation.translate_word(
             word=text,

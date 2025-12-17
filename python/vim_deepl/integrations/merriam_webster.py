@@ -2,7 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
+import urllib.parse
+import urllib.request
 from typing import Optional, Tuple, Dict, Any
+
+MW_SD3_ENDPOINT = "https://www.dictionaryapi.com/api/v3/references/sd3/json/"
+MW_SD3_ENV_VAR = "MW_SD3_API_KEY"
 
 def mw_call(word: str):
     """Call Merriam-Webster Intermediate (sd3) API for an English word.

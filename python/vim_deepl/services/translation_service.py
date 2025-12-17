@@ -38,7 +38,11 @@ class TranslationService:
         if self.deps.mw_fetch is None:
             return None
 
-        defs = self.deps.mw_fetch(term, src_lang)
+        try:
+            defs = self.deps.mw_fetch(term, src_lang)
+        except Exception:
+            return None
+
         if not defs:
             return None
 
@@ -70,6 +74,9 @@ class TranslationService:
             cached = self.repo.get_ctx_entry(word, src_expected, target_lang, h)
             if cached:
                 self.repo.touch_ctx_usage(word, src_expected, target_lang, h, now_s)
+                if self.repo.get_base_entry_any_src(word, target_lang) is None:
+                    self.repo.upsert_base_entry(word, cached["translation"], cached["src_lang"], target_lang, "", now_s)
+
                 mw_defs = self._ensure_mw_definitions(word, cached["src_lang"], now_s)
 
                 return {
@@ -107,6 +114,11 @@ class TranslationService:
                 }
 
             src = self.deps.normalize_src_lang(detected, src_hint)
+
+            # write base entry too (so context words are always searchable in base cache)
+            self.repo.upsert_base_entry(word, tr, src, target_lang, detected, now_s)
+
+            # write context entry
             self.repo.upsert_ctx_entry(word, tr, src, target_lang, h, now_s)
 
             mw_defs = self._ensure_mw_definitions(word, src, now_s)
