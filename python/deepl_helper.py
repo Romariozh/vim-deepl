@@ -12,14 +12,17 @@ import urllib.parse
 import random
 import hashlib
 from datetime import datetime
+
 from vim_deepl.utils.logging import setup_logging
 from vim_deepl.utils.logging import get_logger
 from vim_deepl.utils.config import load_config
-from vim_deepl.transport.vim_stdio import run, _ok, _fail
+from vim_deepl.utils.config import load_config
 from vim_deepl.repos.sqlite_repo import SQLiteRepo
 from vim_deepl.repos.schema import ensure_schema
-from pathlib import Path
 from vim_deepl.repos.dict_repo import DictRepo, resolve_db_path
+from vim_deepl.transport.vim_stdio import run, _ok, _fail
+from vim_deepl.repos.trainer_repo import TrainerRepo
+from pathlib import Path
 
 
 LOGGER = get_logger("deepl_helper")
@@ -409,17 +412,17 @@ def ensure_mw_definitions(
 
 def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     """
-    Выбрать слово/фразу для тренировки из SQLite.
+    Pick a word/phrase for training from SQLite.
 
-    Логика полностью повторяет старую версию:
-    - фильтрация по src_lang (EN/DA или оба),
-    - деление на "recent" / "old" по RECENT_DAYS,
-    - 70% recent / 30% old при наличии обоих,
-    - приоритет:
-        1. count < MASTERY_COUNT
-        2. меньший count
-        3. больший hard
-        4. давнее использование (LRU)
+    Logic mirrors the old version:
+    - filter by src_lang (EN/DA or both),
+    - split into "recent" / "old" by RECENT_DAYS,
+    - 70% recent / 30% old when both exist,
+    - priority:
+        1) count < MASTERY_COUNT
+        2) lower count
+        3) higher hard
+        4) least recently used (LRU)
     """
     now = datetime.now()
     src_filter = (src_filter or "").upper()
@@ -429,46 +432,21 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     else:
         src_langs = ["EN", "DA"]
 
-    conn = get_conn(dict_base_path)
-    placeholders = ",".join("?" for _ in src_langs)
-    cur = conn.cursor()
-    cur.execute(
-        f"""
-        SELECT
-            id,
-            term,
-            translation,
-            src_lang,
-            dst_lang,
-            detected_raw,
-            created_at,
-            last_used,
-            count,
-            hard,
-            ignore
-        FROM entries
-        WHERE ignore = 0
-          AND src_lang IN ({placeholders})
-        """,
-        src_langs,
-    )
-    rows = cur.fetchall()
+    cfg = load_config()
+    db_path = resolve_db_path(dict_base_path, cfg.db_path)
+    repo = TrainerRepo(SQLiteRepo(db_path))
+
+    rows = repo.list_entries_for_training(src_langs)
 
     if not rows:
-        return {
-            "type": "train",
-            "error": f"No entries for filter={src_filter or 'ALL'}",
-        }
+        return {"type": "train", "error": f"No entries for filter={src_filter or 'ALL'}"}
 
     entries = []
     for row in rows:
-        last_str = (
-            row["last_used"]
-            or row["created_at"]
-            or "1970-01-01 00:00:00"
-        )
-        date_dt = parse_dt(row["created_at"] or last_str)
+        last_str = row.get("last_used") or row.get("created_at") or "1970-01-01 00:00:00"
+        date_dt = parse_dt(row.get("created_at") or last_str)
         last_dt = parse_dt(last_str)
+
         age_days = (now - date_dt).days
         bucket = "recent" if age_days <= RECENT_DAYS else "old"
 
@@ -487,12 +465,12 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
             }
         )
 
-    # --- Статистика прогресса ---
+    # --- Progress stats ---
     total = len(entries)
     mastered = sum(1 for e in entries if e["count"] >= MASTERY_COUNT)
     mastery_percent = int(round(mastered * 100 / total)) if total else 0
 
-    # --- делим по "recent"/"old" ---
+    # --- Split into "recent"/"old" buckets ---
     recents = [e for e in entries if e["bucket"] == "recent"]
     olds = [e for e in entries if e["bucket"] == "old"]
 
@@ -503,17 +481,17 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     else:
         pool = recents if random.random() < 0.7 else olds
 
-    # сначала те, кто ещё не "mastered"
+    # Prefer not-yet-mastered items
     not_mastered = [e for e in pool if e["count"] < MASTERY_COUNT]
     if not_mastered:
         pool = not_mastered
 
-    # сортировка по приоритету
+    # Sort by priority: lower count, higher hard, older last_used
     pool.sort(key=lambda e: (e["count"], -e["hard"], e["last"]))
     chosen = pool[0]
 
     now_s = now_str()
-    db_touch_usage(conn, chosen["id"], now_s)
+    repo.touch_usage(chosen["id"], now_s)
 
     return {
         "type": "train",
