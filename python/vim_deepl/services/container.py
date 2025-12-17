@@ -13,10 +13,11 @@ from vim_deepl.services.dict_service import DictService
 from vim_deepl.services.trainer_service import TrainerService, TrainerConfig
 from vim_deepl.services.translation_service import TranslationService, TranslationDeps
 from vim_deepl.integrations.merriam_webster import mw_fetch
+from vim_deepl.integrations.deepl import deepl_call
+
 
 @dataclass(frozen=True)
 class TranslationHooks:
-    deepl_call: Callable
     normalize_src_lang: Callable
     ctx_hash: Callable
 
@@ -59,7 +60,7 @@ def build_services(
     translation_service = None
     if translation_hooks is not None:
         translation_deps = TranslationDeps(
-            deepl_call=translation_hooks.deepl_call,
+            deepl_call=deepl_call,
             normalize_src_lang=translation_hooks.normalize_src_lang,
             ctx_hash=translation_hooks.ctx_hash,
             mw_fetch=mw_fetch,

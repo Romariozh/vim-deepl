@@ -7,8 +7,6 @@ import sys
 import os
 import json
 import sqlite3
-import urllib.request
-import urllib.parse
 import random
 import hashlib
 from datetime import datetime
@@ -21,7 +19,7 @@ from vim_deepl.repos.sqlite_repo import SQLiteRepo
 from vim_deepl.repos.schema import ensure_schema
 from vim_deepl.repos.dict_repo import DictRepo, resolve_db_path
 from vim_deepl.repos.trainer_repo import TrainerRepo
-from vim_deepl.transport.vim_stdio import run, _ok, _fail
+from vim_deepl.transport.vim_stdio import run
 from vim_deepl.services.trainer_service import TrainerService, TrainerConfig
 from vim_deepl.services.dict_service import DictService
 from vim_deepl.services.container import build_services, TranslationHooks
@@ -130,41 +128,6 @@ def mark_hard(dict_base_path: str, src_filter: str, word: str):
     services = build_services(dict_base_path, recent_days=RECENT_DAYS, mastery_count=MASTERY_COUNT)
     return services.dict.mark_hard(word=word, src_filter=src_filter)
 
-def deepl_call(text: str, target_lang: str, context: str = ""):
-    """Perform a DeepL API call."""
-    api_key = os.environ.get("DEEPL_API_KEY", "")
-    if not api_key:
-        return None, "", "DEEPL_API_KEY is not set."
-
-    url = "https://api-free.deepl.com/v2/translate"
-    params = {
-    "auth_key": api_key,
-    "text": text,
-    "target_lang": target_lang,
-    }
-
-    if context:
-        params["context"] = context
-
-    data = urllib.parse.urlencode(params).encode("utf-8")
-
-    req = urllib.request.Request(url, data=data, method="POST")
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            response = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        return None, "", f"DeepL request error: {e}"
-
-    translations = response.get("translations") or []
-    if not translations:
-        return None, "", "DeepL empty response."
-
-    tr_obj = translations[0]
-    translated_text = tr_obj.get("text", "")
-    detected_lang = tr_obj.get("detected_source_language", "")
-
-    return translated_text, detected_lang, None
 
 def oneline(text: str) -> str:
     """Convert text into a single whitespace-normalized line."""
@@ -186,7 +149,6 @@ def normalize_src_lang(detected: str, src_hint: str) -> str:
 
 def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: str = "", context: str = ""):
     hooks = TranslationHooks(
-        deepl_call=deepl_call,
         normalize_src_lang=normalize_src_lang,
         ctx_hash=ctx_hash,
     )
@@ -208,7 +170,6 @@ def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: s
 
 def translate_selection(text: str, dict_base_path: str, target_lang: str, src_hint: str = ""):
     hooks = TranslationHooks(
-        deepl_call=deepl_call,
         normalize_src_lang=normalize_src_lang,
         ctx_hash=ctx_hash,
     )
@@ -237,12 +198,6 @@ def _wrap_result(result: dict):
     return _ok(result)
 
 def dispatch(argv):
-    cfg = load_config()
-    db = SQLiteRepo(cfg.db_path)
-
-    # ensure schema once per run (cheap, idempotent)
-    with db.tx() as conn:
-        ensure_schema(conn)
 
     """Business dispatcher: returns JSON-ready dict (ok:true/false)."""
     if len(argv) < 3:
