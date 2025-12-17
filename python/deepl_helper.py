@@ -24,6 +24,7 @@ from vim_deepl.repos.trainer_repo import TrainerRepo
 from vim_deepl.transport.vim_stdio import run, _ok, _fail
 from vim_deepl.services.trainer_service import TrainerService, TrainerConfig
 from vim_deepl.services.dict_service import DictService
+from vim_deepl.services.container import build_services
 from pathlib import Path
 
 
@@ -413,31 +414,12 @@ def ensure_mw_definitions(
     return defs_by_pos
 
 def pick_training_word(dict_base_path: str, src_filter: str | None = None):
-    """
-    Pick a word/phrase for training.
-
-    This is a thin wrapper around TrainerService:
-      - resolves DB path
-      - wires repo + service config
-      - delegates business logic
-    """
-    cfg = load_config()
-    db_path = resolve_db_path(dict_base_path, cfg.db_path)
-
-    repo = TrainerRepo(SQLiteRepo(db_path))
-    service = TrainerService(
-        repo=repo,
-        cfg=TrainerConfig(
-            recent_days=RECENT_DAYS,
-            mastery_count=MASTERY_COUNT,
-            recent_ratio=0.7,
-        ),
-    )
+    services = build_services(dict_base_path, recent_days=RECENT_DAYS, mastery_count=MASTERY_COUNT)
 
     now = datetime.now()
     now_s = now_str()
 
-    return service.pick_training_word(
+    return services.trainer.pick_training_word(
         src_filter=src_filter,
         now=now,
         now_s=now_s,
@@ -445,22 +427,12 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     )
 
 def mark_ignore(dict_base_path: str, src_filter: str, word: str):
-    cfg = load_config()
-    db_path = resolve_db_path(dict_base_path, cfg.db_path)
-
-    repo = DictRepo(SQLiteRepo(db_path))
-    service = DictService(repo)
-
-    return service.mark_ignore(word=word, src_filter=src_filter)
+    services = build_services(dict_base_path, recent_days=RECENT_DAYS, mastery_count=MASTERY_COUNT)
+    return services.dict.mark_ignore(word=word, src_filter=src_filter)
 
 def mark_hard(dict_base_path: str, src_filter: str, word: str):
-    cfg = load_config()
-    db_path = resolve_db_path(dict_base_path, cfg.db_path)
-
-    repo = DictRepo(SQLiteRepo(db_path))
-    service = DictService(repo)
-
-    return service.mark_hard(word=word, src_filter=src_filter)
+    services = build_services(dict_base_path, recent_days=RECENT_DAYS, mastery_count=MASTERY_COUNT)
+    return services.dict.mark_hard(word=word, src_filter=src_filter)
 
 def deepl_call(text: str, target_lang: str, context: str = ""):
     """Perform a DeepL API call."""
