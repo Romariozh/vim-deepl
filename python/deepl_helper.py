@@ -23,6 +23,7 @@ from vim_deepl.repos.dict_repo import DictRepo, resolve_db_path
 from vim_deepl.repos.trainer_repo import TrainerRepo
 from vim_deepl.transport.vim_stdio import run, _ok, _fail
 from vim_deepl.services.trainer_service import TrainerService, TrainerConfig
+from vim_deepl.services.dict_service import DictService
 from pathlib import Path
 
 
@@ -444,37 +445,22 @@ def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     )
 
 def mark_ignore(dict_base_path: str, src_filter: str, word: str):
-    """Пометить слово как игнорируемое (тренер его пропускает)."""
-    src = (src_filter or "").upper()
-    if src not in ("EN", "DA"):
-        return {"type": "ignore", "error": f"Unsupported src_filter={src_filter}"}
-
     cfg = load_config()
     db_path = resolve_db_path(dict_base_path, cfg.db_path)
+
     repo = DictRepo(SQLiteRepo(db_path))
+    service = DictService(repo)
 
-    changed = repo.set_ignore(term=word, src_lang=src)
-    if changed == 0:
-        return {"type": "ignore", "error": f"Word '{word}' not found for src_lang={src}"}
-
-    return {"type": "ignore", "word": word, "src_lang": src, "ignore": True, "error": None}
+    return service.mark_ignore(word=word, src_filter=src_filter)
 
 def mark_hard(dict_base_path: str, src_filter: str, word: str):
-    """Увеличить 'hard' для слова (оно считается более сложным)."""
-    src = (src_filter or "").upper()
-    if src not in ("EN", "DA"):
-        return {"type": "mark_hard", "error": f"Unsupported src_filter={src_filter}"}
-
     cfg = load_config()
     db_path = resolve_db_path(dict_base_path, cfg.db_path)
+
     repo = DictRepo(SQLiteRepo(db_path))
+    service = DictService(repo)
 
-    hard_val = repo.inc_hard_and_get(term=word, src_lang=src)
-    if hard_val is None:
-        return {"type": "mark_hard", "error": f"Word '{word}' not found for src_lang={src}"}
-
-    return {"type": "mark_hard", "word": word, "src_lang": src, "hard": hard_val, "error": None}
-
+    return service.mark_hard(word=word, src_filter=src_filter)
 
 def deepl_call(text: str, target_lang: str, context: str = ""):
     """Perform a DeepL API call."""
