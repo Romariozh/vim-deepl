@@ -14,7 +14,6 @@ from datetime import datetime
 from vim_deepl.utils.logging import setup_logging
 from vim_deepl.utils.logging import get_logger
 from vim_deepl.utils.config import load_config
-from vim_deepl.utils.config import load_config
 from vim_deepl.repos.sqlite_repo import SQLiteRepo
 from vim_deepl.repos.schema import ensure_schema
 from vim_deepl.repos.dict_repo import DictRepo, resolve_db_path
@@ -33,25 +32,10 @@ LOGGER = get_logger("deepl_helper")
 MW_SD3_ENDPOINT = "https://www.dictionaryapi.com/api/v3/references/sd3/json/"
 MW_SD3_ENV_VAR = "MW_SD3_API_KEY"
 
-def load_dict(path: str):
-    """Load a JSON dictionary file. Return empty dict if missing or broken."""
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError, TypeError):
-        return {}
-
 def now_str() -> str:
     """Get current datetime as a formatted string."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def save_dict(path: str, data: dict) -> None:
-    """Save dictionary JSON ensuring folder exists."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
 
 # Recent/learning parameters
 RECENT_DAYS = 7      # Words added within the last X days are considered "recent"
@@ -68,39 +52,6 @@ def parse_dt(s: str) -> datetime:
 
 DB_FILENAME = "vocab.db"
 
-
-def get_db_path(dict_base_path: str) -> str:
-    """
-    Build path to SQLite DB near the old JSON dictionaries.
-
-    Example:
-    dict_base_path=~/.local/share/vim-deepl/dict
-    -> ~/.local/share/vim-deepl/vocab.db
-    """
-    base_dir = os.path.dirname(dict_base_path)
-    os.makedirs(base_dir, exist_ok=True)
-    return os.path.join(base_dir, DB_FILENAME)
-
-def get_conn(dict_base_path: str) -> sqlite3.Connection:
-    """
-    Backward-compatible: returns sqlite3.Connection,
-    but connection is created via SQLiteRepo and schema is ensured.
-    """
-    cfg = load_config()
-    db_path = resolve_db_path(dict_base_path, cfg.db_path)
-    LOGGER.info("DB open: %s", db_path)
-
-    repo = SQLiteRepo(db_path)
-    conn = repo.connect()
-
-    # Safe to call; idempotent. No commit inside ensure_schema.
-    ensure_schema(conn)
-    conn.commit()  # commit DDL if any
-
-    return conn
-
-def init_db(conn: sqlite3.Connection) -> None:
-    ensure_schema(conn)
 
 def ctx_hash(context: str) -> str:
     ctx = (context or "").strip()
@@ -147,11 +98,14 @@ def normalize_src_lang(detected: str, src_hint: str) -> str:
         return hint
     return "EN"
 
-def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: str = "", context: str = ""):
-    hooks = TranslationHooks(
+def build_translation_hooks() -> TranslationHooks:
+    return TranslationHooks(
         normalize_src_lang=normalize_src_lang,
         ctx_hash=ctx_hash,
     )
+
+def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: str = "", context: str = ""):
+    hooks = build_translation_hooks()
     services = build_services(
         dict_base_path,
         recent_days=RECENT_DAYS,
@@ -169,10 +123,7 @@ def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: s
 
 
 def translate_selection(text: str, dict_base_path: str, target_lang: str, src_hint: str = ""):
-    hooks = TranslationHooks(
-        normalize_src_lang=normalize_src_lang,
-        ctx_hash=ctx_hash,
-    )
+    hooks = build_translation_hooks()
     services = build_services(
         dict_base_path,
         recent_days=RECENT_DAYS,
