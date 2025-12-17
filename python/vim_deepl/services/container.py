@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from typing import Optional
+from typing import Optional, Callable
 
 from vim_deepl.utils.config import load_config
 from vim_deepl.repos.sqlite_repo import SQLiteRepo
@@ -12,7 +12,13 @@ from vim_deepl.repos.translation_repo import TranslationRepo
 from vim_deepl.services.dict_service import DictService
 from vim_deepl.services.trainer_service import TrainerService, TrainerConfig
 from vim_deepl.services.translation_service import TranslationService, TranslationDeps
+from vim_deepl.integrations.merriam_webster import mw_fetch
 
+@dataclass(frozen=True)
+class TranslationHooks:
+    deepl_call: Callable
+    normalize_src_lang: Callable
+    ctx_hash: Callable
 
 @dataclass(frozen=True)
 class Services:
@@ -20,13 +26,12 @@ class Services:
     trainer: TrainerService
     translation: Optional[TranslationService] = None
 
-
 def build_services(
     dict_base_path: str,
     *,
     recent_days: int,
     mastery_count: int,
-    translation_deps: Optional[TranslationDeps] = None,
+    translation_hooks: Optional[TranslationHooks] = None,
 ) -> Services:
 
     """
@@ -52,10 +57,17 @@ def build_services(
     )
 
     translation_service = None
-    if translation_deps is not None:
+    if translation_hooks is not None:
+        translation_deps = TranslationDeps(
+            deepl_call=translation_hooks.deepl_call,
+            normalize_src_lang=translation_hooks.normalize_src_lang,
+            ctx_hash=translation_hooks.ctx_hash,
+            mw_fetch=mw_fetch,
+        )
         translation_service = TranslationService(
             repo=TranslationRepo(sqlite),
             deps=translation_deps,
         )
 
     return Services(dict=dict_service, trainer=trainer_service, translation=translation_service)
+

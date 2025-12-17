@@ -24,7 +24,7 @@ from vim_deepl.repos.trainer_repo import TrainerRepo
 from vim_deepl.transport.vim_stdio import run, _ok, _fail
 from vim_deepl.services.trainer_service import TrainerService, TrainerConfig
 from vim_deepl.services.dict_service import DictService
-from vim_deepl.services.container import build_services
+from vim_deepl.services.container import build_services, TranslationHooks
 from vim_deepl.services.translation_service import TranslationDeps
 
 from pathlib import Path
@@ -171,22 +171,6 @@ def mw_extract_definitions(entries: list) -> dict:
 
     return result
 
-def mw_fetch(term: str, src_lang: str) -> dict | None:
-    """Fetch Merriam-Webster definitions from API and return defs dict for caching."""
-    if (src_lang or "").upper() != "EN":
-        return None
-
-    data, err = mw_call(term)
-    if err or not data:
-        return None
-
-    defs_by_pos = mw_extract_definitions(data)
-    if not defs_by_pos or not any(defs_by_pos.values()):
-        return None
-
-    defs_by_pos = dict(defs_by_pos)
-    defs_by_pos["raw_json"] = json.dumps(data, ensure_ascii=False)
-    return defs_by_pos
 
 def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     services = build_services(dict_base_path, recent_days=RECENT_DAYS, mastery_count=MASTERY_COUNT)
@@ -263,30 +247,19 @@ def normalize_src_lang(detected: str, src_hint: str) -> str:
         return hint
     return "EN"
 
-def translate_word(
-    word: str,
-    dict_base_path: str,
-    target_lang: str,
-    src_hint: str = "",
-    context: str = "",
-):
-    """Translate a single word with caching and optional context."""
-    deps = TranslationDeps(
+def translate_word(word: str, dict_base_path: str, target_lang: str, src_hint: str = "", context: str = ""):
+    hooks = TranslationHooks(
         deepl_call=deepl_call,
         normalize_src_lang=normalize_src_lang,
         ctx_hash=ctx_hash,
-        mw_fetch=mw_fetch,
     )
-
     services = build_services(
         dict_base_path,
         recent_days=RECENT_DAYS,
         mastery_count=MASTERY_COUNT,
-        translation_deps=deps,
+        translation_hooks=hooks,
     )
-
     now_s = now_str()
-    # services.translation is guaranteed when translation_deps is provided
     return services.translation.translate_word(
         word=word,
         target_lang=target_lang,
@@ -295,32 +268,21 @@ def translate_word(
         context=context,
     )
 
-def translate_selection(
-    text: str,
-    dict_base_path: str,
-    target_lang: str,
-    src_hint: str = "",
-):
-    """Translate any selection (no SQLite cache)."""
-    deps = TranslationDeps(
+
+def translate_selection(text: str, dict_base_path: str, target_lang: str, src_hint: str = ""):
+    hooks = TranslationHooks(
         deepl_call=deepl_call,
         normalize_src_lang=normalize_src_lang,
         ctx_hash=ctx_hash,
-        mw_fetch=mw_fetch,
     )
-
     services = build_services(
         dict_base_path,
         recent_days=RECENT_DAYS,
         mastery_count=MASTERY_COUNT,
-        translation_deps=deps,
+        translation_hooks=hooks,
     )
+    return services.translation.translate_selection(text=text, target_lang=target_lang, src_hint=src_hint)
 
-    return services.translation.translate_selection(
-        text=text,
-        target_lang=target_lang,
-        src_hint=src_hint,
-    )
 
 def _ok(data):
     return {"ok": True, "data": data}
