@@ -108,69 +108,6 @@ def ctx_hash(context: str) -> str:
     ctx = (context or "").strip()
     return hashlib.sha256(ctx.encode("utf-8")).hexdigest()
 
-def mw_call(word: str):
-    """Call Merriam-Webster Intermediate (sd3) API for an English word.
-
-    Returns (data, error) where:
-      - data is parsed JSON (Python object) or None on error
-      - error is None or error message
-    """
-    api_key = os.environ.get(MW_SD3_ENV_VAR, "")
-    if not api_key:
-        return None, f"{MW_SD3_ENV_VAR} is not set."
-
-    url = MW_SD3_ENDPOINT + urllib.parse.quote(word) + f"?key={api_key}"
-    req = urllib.request.Request(url, method="GET")
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read().decode("utf-8")
-            data = json.loads(body)
-    except Exception as e:
-        return None, f"MW request error: {e}"
-
-    if not isinstance(data, list):
-        return None, "MW response is not a list."
-    return data, None
-
-def mw_extract_definitions(entries: list) -> dict:
-    """Group Merriam-Webster shortdef strings by part of speech.
-
-    Returns dict with keys: noun, verb, adjective, adverb, other.
-    """
-    result: dict[str, list[str]] = {
-        "noun": [],
-        "verb": [],
-        "adjective": [],
-        "adverb": [],
-        "other": [],
-    }
-
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        fl = (entry.get("fl") or "").lower()  # function label / part of speech
-        shortdefs = entry.get("shortdef") or []
-        if not isinstance(shortdefs, list):
-            continue
-
-        # Decide bucket
-        if fl == "noun":
-            bucket = "noun"
-        elif fl == "verb":
-            bucket = "verb"
-        elif fl in ("adjective", "adj."):
-            bucket = "adjective"
-        elif fl in ("adverb", "adv."):
-            bucket = "adverb"
-        else:
-            bucket = "other"
-
-        for d in shortdefs:
-            if isinstance(d, str) and d.strip():
-                result[bucket].append(d.strip())
-
-    return result
-
 
 def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     services = build_services(dict_base_path, recent_days=RECENT_DAYS, mastery_count=MASTERY_COUNT)
