@@ -25,6 +25,8 @@ from vim_deepl.transport.vim_stdio import run, _ok, _fail
 from vim_deepl.services.trainer_service import TrainerService, TrainerConfig
 from vim_deepl.services.dict_service import DictService
 from vim_deepl.services.container import build_services
+from vim_deepl.services.translation_service import TranslationDeps
+
 from pathlib import Path
 
 
@@ -495,164 +497,30 @@ def translate_word(
     src_hint: str = "",
     context: str = "",
 ):
-    """Translation of a single word with caching in SQLite and repetition counters."""
-    target_lang = (target_lang or "RU").upper()
+    """Translate a single word with caching and optional context."""
+    deps = TranslationDeps(
+        deepl_call=deepl_call,
+        normalize_src_lang=normalize_src_lang,
+        ctx_hash=ctx_hash,
+        mw_fetch=None,  # TODO: wire MW fetcher later
+    )
 
-    conn = get_conn(dict_base_path)
-    now = now_str()
+    services = build_services(
+        dict_base_path,
+        recent_days=RECENT_DAYS,
+        mastery_count=MASTERY_COUNT,
+        translation_deps=deps,
+    )
 
-    # --- debug/meta flags ---
-    ctx = (context or "").strip()
-    context_used = bool(ctx)
-    cache_source = None  # "context" | "base" | None
-
-    # ------------------------------------------------------------
-    # 1) CONTEXT MODE (separate cache: entries_ctx)
-    # ------------------------------------------------------------
-    if ctx:
-        src_expected = (src_hint or "").upper() or "EN"
-        h = ctx_hash(ctx)
-
-        cached = db_get_entry_ctx(conn, word, src_expected, target_lang, h)
-        if cached:
-            # update usage counter in context cache
-            db_touch_usage_ctx(conn, word, src_expected, target_lang, h)
-
-            mw_defs = None
-            if cached["src_lang"] == "EN":
-                mw_defs = ensure_mw_definitions(conn, word, cached["src_lang"])
-
-            return {
-                "type": "word",
-                "source": word,
-                "text": cached["translation"],
-                "target_lang": target_lang,
-                "detected_source_lang": cached["src_lang"],
-                "from_cache": True,
-                "timestamp": cached["created_at"],
-                "last_used": now,
-                "count": cached["count"] + 1,
-                "error": None,
-                "mw_definitions": mw_defs,
-                "context_used": True,
-                "cache_source": "context",
-            }
-
-        # not in context cache -> call DeepL with context
-        tr, detected, err = deepl_call(word, target_lang, context=ctx)
-        if err:
-            return {
-                "type": "word",
-                "source": word,
-                "text": "",
-                "target_lang": target_lang,
-                "detected_source_lang": "",
-                "from_cache": False,
-                "timestamp": now,
-                "last_used": now,
-                "count": 0,
-                "error": err,
-                "mw_definitions": None,
-                "context_used": True,
-                "cache_source": None,
-            }
-
-        # normalize detected source
-        src = normalize_src_lang(detected, src_hint)
-
-        # store ONLY in context cache (do not touch base entries)
-        db_upsert_entry_ctx(conn, word, tr, src, target_lang, h)
-
-        mw_defs = None
-        if src == "EN":
-            mw_defs = ensure_mw_definitions(conn, word, src)
-
-        return {
-            "type": "word",
-            "source": word,
-            "text": tr,
-            "target_lang": target_lang,
-            "detected_source_lang": src,
-            "from_cache": False,
-            "timestamp": now,
-            "last_used": now,
-            "count": 1,
-            "error": None,
-            "mw_definitions": mw_defs,
-            "context_used": True,
-            "cache_source": None,
-        }
-
-    # ------------------------------------------------------------
-    # 2) BASE MODE (original cache: entries)
-    # ------------------------------------------------------------
-    row = db_get_entry_any_src(conn, word, target_lang)
-    if row is not None:
-        db_touch_usage(conn, row["id"], now)
-
-        mw_defs = None
-        if row["src_lang"] == "EN":
-            mw_defs = ensure_mw_definitions(conn, word, row["src_lang"])
-
-        return {
-            "type": "word",
-            "source": word,
-            "text": row["translation"],
-            "target_lang": target_lang,
-            "detected_source_lang": row["src_lang"],
-            "from_cache": True,
-            "timestamp": row["created_at"],
-            "last_used": now,
-            "count": row["count"] + 1,
-            "error": None,
-            "mw_definitions": mw_defs,
-            "context_used": False,
-            "cache_source": "base",
-        }
-
-    # fallback: call DeepL (no context)
-    tr, detected, err = deepl_call(word, target_lang, context="")
-    if err:
-        return {
-            "type": "word",
-            "source": word,
-            "text": "",
-            "target_lang": target_lang,
-            "detected_source_lang": "",
-            "from_cache": False,
-            "timestamp": now,
-            "last_used": now,
-            "count": 0,
-            "error": err,
-            "mw_definitions": None,
-            "context_used": False,
-            "cache_source": None,
-        }
-
-    src = normalize_src_lang(detected, src_hint)
-
-    # store in base cache
-    db_upsert_entry(conn, word, tr, src, target_lang, detected, now)
-
-    mw_defs = None
-    if src == "EN":
-        mw_defs = ensure_mw_definitions(conn, word, src)
-
-    return {
-        "type": "word",
-        "source": word,
-        "text": tr,
-        "target_lang": target_lang,
-        "detected_source_lang": src,
-        "from_cache": False,
-        "timestamp": now,
-        "last_used": now,
-        "count": 1,
-        "error": None,
-        "mw_definitions": mw_defs,
-        "context_used": False,
-        "cache_source": None,
-    }
+    now_s = now_str()
+    # services.translation is guaranteed when translation_deps is provided
+    return services.translation.translate_word(
+        word=word,
+        target_lang=target_lang,
+        src_hint=src_hint,
+        now_s=now_s,
+        context=context,
+    )
 
 def translate_selection(
     text: str,
@@ -660,33 +528,26 @@ def translate_selection(
     target_lang: str,
     src_hint: str = "",
 ):
-    """
-    Translation of any text fragment (4+ words and more).
-    No dictionary/SQLite is used here – we simply proxy DeepL.
-    """
-    target_lang = (target_lang or "RU").upper()
+    """Translate any selection (no SQLite cache)."""
+    deps = TranslationDeps(
+        deepl_call=deepl_call,
+        normalize_src_lang=normalize_src_lang,
+        ctx_hash=ctx_hash,
+        mw_fetch=None,  # TODO: wire MW fetcher later
+    )
 
-    tr, detected, err = deepl_call(text, target_lang)
-    if err:
-        return {
-            "type": "selection",
-            "source": text,
-            "text": "",
-            "target_lang": target_lang,
-            "detected_source_lang": "",
-            "error": err,
-        }
+    services = build_services(
+        dict_base_path,
+        recent_days=RECENT_DAYS,
+        mastery_count=MASTERY_COUNT,
+        translation_deps=deps,
+    )
 
-    src = normalize_src_lang(detected, src_hint)
-
-    return {
-        "type": "selection",
-            "source": text,
-            "text": tr,
-            "target_lang": target_lang,
-            "detected_source_lang": src,
-            "error": None,
-    }
+    return services.translation.translate_selection(
+        text=text,
+        target_lang=target_lang,
+        src_hint=src_hint,
+    )
 
 def _ok(data):
     return {"ok": True, "data": data}
@@ -696,6 +557,12 @@ def _fail(message, code="ERROR", details=None):
     if details is not None:
         err["details"] = details
     return {"ok": False, "error": err}
+
+def _wrap_result(result: dict):
+    err = result.get("error")
+    if err:
+        return _fail(str(err), code="ERROR", details=result)
+    return _ok(result)
 
 def dispatch(argv):
     cfg = load_config()
@@ -722,7 +589,7 @@ def dispatch(argv):
         target_lang = argv[4] if len(argv) >= 5 else "RU"
         src_hint = argv[5] if len(argv) >= 6 else ""
         result = translate_word(text, dict_base_path, target_lang, src_hint)
-        return _ok(result)
+        return _wrap_result(result)
 
     elif mode == "selection":
         # python3 deepl_helper.py selection "long text" ~/.local/.../dict RU EN
@@ -734,13 +601,13 @@ def dispatch(argv):
         target = argv[4] if len(argv) > 4 else "RU"
         src_hint = argv[5] if len(argv) > 5 else ""
         result = translate_selection(text, dict_base, target, src_hint)
-        return _ok(result)
+        return _wrap_result(result)
 
     elif mode == "train":
         dict_base_path = text
         src_filter = argv[3] if len(argv) >= 4 else ""
         result = pick_training_word(dict_base_path, src_filter or None)
-        return _ok(result)
+        return _wrap_result(result)
 
     elif mode == "mark_hard":
         if len(argv) < 5:
@@ -751,7 +618,7 @@ def dispatch(argv):
         src_filter = argv[3]
         word = argv[4]
         result = mark_hard(dict_base_path, src_filter, word)
-        return _ok(result)
+        return _wrap_result(result)
 
     elif mode == "ignore":
         if len(argv) < 5:
@@ -762,7 +629,7 @@ def dispatch(argv):
         src_filter = argv[3]
         word = argv[4]
         result = mark_ignore(dict_base_path, src_filter, word)
-        return _ok(result)
+        return _wrap_result(result)
 
     else:
         LOGGER.warning("Unknown mode: %s argv=%s", mode, argv)

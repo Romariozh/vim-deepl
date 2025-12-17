@@ -2,21 +2,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing import Optional
+
 from vim_deepl.utils.config import load_config
 from vim_deepl.repos.sqlite_repo import SQLiteRepo
 from vim_deepl.repos.dict_repo import DictRepo, resolve_db_path
 from vim_deepl.repos.trainer_repo import TrainerRepo
+from vim_deepl.repos.translation_repo import TranslationRepo
 from vim_deepl.services.dict_service import DictService
 from vim_deepl.services.trainer_service import TrainerService, TrainerConfig
+from vim_deepl.services.translation_service import TranslationService, TranslationDeps
 
 
 @dataclass(frozen=True)
 class Services:
     dict: DictService
     trainer: TrainerService
+    translation: Optional[TranslationService] = None
 
 
-def build_services(dict_base_path: str, *, recent_days: int, mastery_count: int) -> Services:
+def build_services(
+    dict_base_path: str,
+    *,
+    recent_days: int,
+    mastery_count: int,
+    translation_deps: Optional[TranslationDeps] = None,
+) -> Services:
+
     """
     Central wiring point:
       - load config
@@ -39,4 +51,11 @@ def build_services(dict_base_path: str, *, recent_days: int, mastery_count: int)
         ),
     )
 
-    return Services(dict=dict_service, trainer=trainer_service)
+    translation_service = None
+    if translation_deps is not None:
+        translation_service = TranslationService(
+            repo=TranslationRepo(sqlite),
+            deps=translation_deps,
+        )
+
+    return Services(dict=dict_service, trainer=trainer_service, translation=translation_service)
