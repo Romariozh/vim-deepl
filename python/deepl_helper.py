@@ -20,8 +20,9 @@ from vim_deepl.utils.config import load_config
 from vim_deepl.repos.sqlite_repo import SQLiteRepo
 from vim_deepl.repos.schema import ensure_schema
 from vim_deepl.repos.dict_repo import DictRepo, resolve_db_path
-from vim_deepl.transport.vim_stdio import run, _ok, _fail
 from vim_deepl.repos.trainer_repo import TrainerRepo
+from vim_deepl.transport.vim_stdio import run, _ok, _fail
+from vim_deepl.services.trainer_service import TrainerService, TrainerConfig
 from pathlib import Path
 
 
@@ -412,104 +413,35 @@ def ensure_mw_definitions(
 
 def pick_training_word(dict_base_path: str, src_filter: str | None = None):
     """
-    Pick a word/phrase for training from SQLite.
+    Pick a word/phrase for training.
 
-    Logic mirrors the old version:
-    - filter by src_lang (EN/DA or both),
-    - split into "recent" / "old" by RECENT_DAYS,
-    - 70% recent / 30% old when both exist,
-    - priority:
-        1) count < MASTERY_COUNT
-        2) lower count
-        3) higher hard
-        4) least recently used (LRU)
+    This is a thin wrapper around TrainerService:
+      - resolves DB path
+      - wires repo + service config
+      - delegates business logic
     """
-    now = datetime.now()
-    src_filter = (src_filter or "").upper()
-
-    if src_filter in ("EN", "DA"):
-        src_langs = [src_filter]
-    else:
-        src_langs = ["EN", "DA"]
-
     cfg = load_config()
     db_path = resolve_db_path(dict_base_path, cfg.db_path)
+
     repo = TrainerRepo(SQLiteRepo(db_path))
+    service = TrainerService(
+        repo=repo,
+        cfg=TrainerConfig(
+            recent_days=RECENT_DAYS,
+            mastery_count=MASTERY_COUNT,
+            recent_ratio=0.7,
+        ),
+    )
 
-    rows = repo.list_entries_for_training(src_langs)
-
-    if not rows:
-        return {"type": "train", "error": f"No entries for filter={src_filter or 'ALL'}"}
-
-    entries = []
-    for row in rows:
-        last_str = row.get("last_used") or row.get("created_at") or "1970-01-01 00:00:00"
-        date_dt = parse_dt(row.get("created_at") or last_str)
-        last_dt = parse_dt(last_str)
-
-        age_days = (now - date_dt).days
-        bucket = "recent" if age_days <= RECENT_DAYS else "old"
-
-        entries.append(
-            {
-                "id": row["id"],
-                "src": row["src_lang"],
-                "word": row["term"],
-                "translation": row["translation"],
-                "target_lang": row["dst_lang"],
-                "count": row["count"],
-                "hard": row["hard"],
-                "last": last_dt,
-                "date_dt": date_dt,
-                "bucket": bucket,
-            }
-        )
-
-    # --- Progress stats ---
-    total = len(entries)
-    mastered = sum(1 for e in entries if e["count"] >= MASTERY_COUNT)
-    mastery_percent = int(round(mastered * 100 / total)) if total else 0
-
-    # --- Split into "recent"/"old" buckets ---
-    recents = [e for e in entries if e["bucket"] == "recent"]
-    olds = [e for e in entries if e["bucket"] == "old"]
-
-    if not recents:
-        pool = olds
-    elif not olds:
-        pool = recents
-    else:
-        pool = recents if random.random() < 0.7 else olds
-
-    # Prefer not-yet-mastered items
-    not_mastered = [e for e in pool if e["count"] < MASTERY_COUNT]
-    if not_mastered:
-        pool = not_mastered
-
-    # Sort by priority: lower count, higher hard, older last_used
-    pool.sort(key=lambda e: (e["count"], -e["hard"], e["last"]))
-    chosen = pool[0]
-
+    now = datetime.now()
     now_s = now_str()
-    repo.touch_usage(chosen["id"], now_s)
 
-    return {
-        "type": "train",
-        "word": chosen["word"],
-        "translation": chosen["translation"],
-        "src_lang": chosen["src"],
-        "target_lang": chosen["target_lang"],
-        "timestamp": now_s,
-        "count": chosen["count"] + 1,
-        "hard": chosen["hard"],
-        "stats": {
-            "total": total,
-            "mastered": mastered,
-            "mastery_threshold": MASTERY_COUNT,
-            "mastery_percent": mastery_percent,
-        },
-        "error": None,
-    }
+    return service.pick_training_word(
+        src_filter=src_filter,
+        now=now,
+        now_s=now_s,
+        parse_dt=parse_dt,
+    )
 
 def mark_ignore(dict_base_path: str, src_filter: str, word: str):
     """Пометить слово как игнорируемое (тренер его пропускает)."""
