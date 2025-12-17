@@ -18,6 +18,9 @@ from vim_deepl.utils.config import load_config
 from vim_deepl.transport.vim_stdio import run, _ok, _fail
 from vim_deepl.repos.sqlite_repo import SQLiteRepo
 from vim_deepl.repos.schema import ensure_schema
+from pathlib import Path
+from vim_deepl.repos.dict_repo import DictRepo, resolve_db_path
+
 
 LOGGER = get_logger("deepl_helper")
 
@@ -72,13 +75,22 @@ def get_db_path(dict_base_path: str) -> str:
     os.makedirs(base_dir, exist_ok=True)
     return os.path.join(base_dir, DB_FILENAME)
 
-
 def get_conn(dict_base_path: str) -> sqlite3.Connection:
-    """Open SQLite connection (and initialize schema on first use)."""
-    db_path = get_db_path(dict_base_path)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    init_db(conn)
+    """
+    Backward-compatible: returns sqlite3.Connection,
+    but connection is created via SQLiteRepo and schema is ensured.
+    """
+    cfg = load_config()
+    db_path = resolve_db_path(dict_base_path, cfg.db_path)
+    LOGGER.info("DB open: %s", db_path)
+
+    repo = SQLiteRepo(db_path)
+    conn = repo.connect()
+
+    # Safe to call; idempotent. No commit inside ensure_schema.
+    ensure_schema(conn)
+    conn.commit()  # commit DDL if any
+
     return conn
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -525,86 +537,33 @@ def mark_ignore(dict_base_path: str, src_filter: str, word: str):
     """Пометить слово как игнорируемое (тренер его пропускает)."""
     src = (src_filter or "").upper()
     if src not in ("EN", "DA"):
-        return {
-            "type": "ignore",
-            "error": f"Unsupported src_filter={src_filter}",
-        }
+        return {"type": "ignore", "error": f"Unsupported src_filter={src_filter}"}
 
-    conn = get_conn(dict_base_path)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE entries
-        SET ignore = 1
-        WHERE term = ?
-          AND src_lang = ?
-        """,
-        (word, src),
-    )
-    changed = cur.rowcount
-    conn.commit()
+    cfg = load_config()
+    db_path = resolve_db_path(dict_base_path, cfg.db_path)
+    repo = DictRepo(SQLiteRepo(db_path))
 
+    changed = repo.set_ignore(term=word, src_lang=src)
     if changed == 0:
-        return {
-            "type": "ignore",
-            "error": f"Word '{word}' not found for src_lang={src}",
-        }
+        return {"type": "ignore", "error": f"Word '{word}' not found for src_lang={src}"}
 
-    return {
-        "type": "ignore",
-        "word": word,
-        "src_lang": src,
-        "ignore": True,
-        "error": None,
-    }
+    return {"type": "ignore", "word": word, "src_lang": src, "ignore": True, "error": None}
 
 def mark_hard(dict_base_path: str, src_filter: str, word: str):
     """Увеличить 'hard' для слова (оно считается более сложным)."""
     src = (src_filter or "").upper()
     if src not in ("EN", "DA"):
-        return {
-            "type": "mark_hard",
-            "error": f"Unsupported src_filter={src_filter}",
-        }
+        return {"type": "mark_hard", "error": f"Unsupported src_filter={src_filter}"}
 
-    conn = get_conn(dict_base_path)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE entries
-        SET hard = hard + 1
-        WHERE term = ?
-          AND src_lang = ?
-        """,
-        (word, src),
-    )
-    if cur.rowcount == 0:
-        conn.commit()
-        return {
-            "type": "mark_hard",
-            "error": f"Word '{word}' not found for src_lang={src}",
-        }
+    cfg = load_config()
+    db_path = resolve_db_path(dict_base_path, cfg.db_path)
+    repo = DictRepo(SQLiteRepo(db_path))
 
-    # Получим новое значение
-    cur.execute(
-        """
-        SELECT hard
-        FROM entries
-        WHERE term = ?
-          AND src_lang = ?
-        """,
-        (word, src),
-    )
-    row = cur.fetchone()
-    conn.commit()
+    hard_val = repo.inc_hard_and_get(term=word, src_lang=src)
+    if hard_val is None:
+        return {"type": "mark_hard", "error": f"Word '{word}' not found for src_lang={src}"}
 
-    return {
-        "type": "mark_hard",
-        "word": word,
-        "src_lang": src,
-        "hard": row["hard"] if row else None,
-        "error": None,
-    }
+    return {"type": "mark_hard", "word": word, "src_lang": src, "hard": hard_val, "error": None}
 
 
 def deepl_call(text: str, target_lang: str, context: str = ""):
