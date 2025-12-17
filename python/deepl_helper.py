@@ -104,207 +104,9 @@ def get_conn(dict_base_path: str) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     ensure_schema(conn)
 
-def db_get_entry_any_src(
-    conn: sqlite3.Connection,
-    term: str,
-    dst_lang: str,
-) -> sqlite3.Row | None:
-    """
-    Найти слово по term и целевому языку (dst_lang), не зная src_lang заранее.
-    Берем одну самую «используемую» запись.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT *
-        FROM entries
-        WHERE term = ?
-          AND dst_lang = ?
-          AND ignore = 0
-        ORDER BY count DESC, last_used DESC
-        LIMIT 1
-        """,
-        (term, dst_lang),
-    )
-    return cur.fetchone()
-
-
-def db_upsert_entry(
-    conn: sqlite3.Connection,
-    term: str,
-    translation: str,
-    src_lang: str,
-    dst_lang: str,
-    detected_raw: str,
-    now_s: str,
-) -> None:
-    """Вставить или обновить запись о слове."""
-    conn.execute(
-        """
-        INSERT INTO entries (
-            term, translation, src_lang, dst_lang,
-            detected_raw, created_at, last_used, count
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-        ON CONFLICT(term, src_lang, dst_lang)
-        DO UPDATE SET
-            translation  = excluded.translation,
-            detected_raw = excluded.detected_raw
-        """,
-        (term, translation, src_lang, dst_lang, detected_raw, now_s, now_s),
-    )
-    conn.commit()
-
 def ctx_hash(context: str) -> str:
     ctx = (context or "").strip()
     return hashlib.sha256(ctx.encode("utf-8")).hexdigest()
-
-
-def db_get_entry_ctx(conn: sqlite3.Connection, term: str, src_lang: str, dst_lang: str, h: str):
-    row = conn.execute(
-        """
-        SELECT term, translation, src_lang, dst_lang, created_at, last_used, count
-        FROM entries_ctx
-        WHERE term=? AND src_lang=? AND dst_lang=? AND ctx_hash=?
-        """,
-        (term, src_lang, dst_lang, h),
-    ).fetchone()
-    if not row:
-        return None
-    return {
-        "term": row[0],
-        "translation": row[1],
-        "src_lang": row[2],
-        "dst_lang": row[3],
-        "created_at": row[4],
-        "last_used": row[5],
-        "count": row[6],
-    }
-
-
-def db_upsert_entry_ctx(conn: sqlite3.Connection, term: str, translation: str, src_lang: str, dst_lang: str, h: str):
-    now = now_str()
-    conn.execute(
-        """
-        INSERT INTO entries_ctx(term, translation, src_lang, dst_lang, ctx_hash, created_at, last_used, count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-        ON CONFLICT(term, src_lang, dst_lang, ctx_hash)
-        DO UPDATE SET
-            translation = excluded.translation,
-            last_used   = excluded.last_used,
-            count       = entries_ctx.count + 1
-        """,
-        (term, translation, src_lang, dst_lang, h, now, now),
-    )
-    conn.commit()
-
-
-def db_touch_usage_ctx(conn: sqlite3.Connection, term: str, src_lang: str, dst_lang: str, h: str):
-    now = now_str()
-    conn.execute(
-        """
-        UPDATE entries_ctx
-        SET last_used=?, count=count+1
-        WHERE term=? AND src_lang=? AND dst_lang=? AND ctx_hash=?
-        """,
-        (now, term, src_lang, dst_lang, h),
-    )
-    conn.commit()
-
-def db_touch_usage(
-    conn: sqlite3.Connection,
-    entry_id: int,
-    now_s: str,
-) -> None:
-    """Обновить last_used и увеличить count."""
-    conn.execute(
-        """
-        UPDATE entries
-        SET last_used = ?,
-            count     = count + 1
-        WHERE id = ?
-        """,
-        (now_s, entry_id),
-    )
-    conn.commit()
-
-def db_get_mw_definitions(
-    conn: sqlite3.Connection,
-    term: str,
-    src_lang: str = "EN",
-) -> dict | None:
-    """Return MW definitions for term/src_lang from mw_definitions, or None."""
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT term, src_lang,
-               defs_noun, defs_verb, defs_adj, defs_adv, defs_other,
-               raw_json, created_at
-        FROM mw_definitions
-        WHERE term = ? AND src_lang = ?
-        """,
-        (term, src_lang),
-    )
-    row = cur.fetchone()
-    if not row:
-        return None
-
-    def _load(s: str | None) -> list[str]:
-        if not s:
-            return []
-        try:
-            return json.loads(s)
-        except Exception:
-            return []
-
-    return {
-        "term": row["term"],
-        "src_lang": row["src_lang"],
-        "noun": _load(row["defs_noun"]),
-        "verb": _load(row["defs_verb"]),
-        "adjective": _load(row["defs_adj"]),
-        "adverb": _load(row["defs_adv"]),
-        "other": _load(row["defs_other"]),
-        "raw": row["raw_json"],  # raw JSON string
-        "created_at": row["created_at"],
-    }
-
-
-def db_upsert_mw_definitions(
-    conn: sqlite3.Connection,
-    term: str,
-    src_lang: str,
-    defs_by_pos: dict,
-    raw_json: str,
-    now_s: str,
-) -> None:
-    """Insert or update MW definitions for a term."""
-    # defs_by_pos keys: "noun", "verb", "adjective", "adverb", "other"
-    noun = json.dumps(defs_by_pos.get("noun", []), ensure_ascii=False)
-    verb = json.dumps(defs_by_pos.get("verb", []), ensure_ascii=False)
-    adj = json.dumps(defs_by_pos.get("adjective", []), ensure_ascii=False)
-    adv = json.dumps(defs_by_pos.get("adverb", []), ensure_ascii=False)
-    other = json.dumps(defs_by_pos.get("other", []), ensure_ascii=False)
-
-    conn.execute(
-        """
-        INSERT INTO mw_definitions (
-            term, src_lang,
-            defs_noun, defs_verb, defs_adj, defs_adv, defs_other,
-            raw_json, created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(term, src_lang) DO UPDATE SET
-            defs_noun = excluded.defs_noun,
-            defs_verb = excluded.defs_verb,
-            defs_adj  = excluded.defs_adj,
-            defs_adv  = excluded.defs_adv,
-            defs_other = excluded.defs_other,
-            raw_json  = excluded.raw_json
-        """,
-        (term, src_lang, noun, verb, adj, adv, other, raw_json, now_s),
-    )
-    conn.commit()
 
 def mw_call(word: str):
     """Call Merriam-Webster Intermediate (sd3) API for an English word.
@@ -369,50 +171,21 @@ def mw_extract_definitions(entries: list) -> dict:
 
     return result
 
-def ensure_mw_definitions(
-    conn: sqlite3.Connection,
-    term: str,
-    src_lang: str,
-) -> dict | None:
-    """Get MW definitions from DB if present, otherwise fetch from API and store.
-
-    Returns dict like mw_extract_definitions(), or None on error.
-    """
-    src_lang = (src_lang or "").upper()
-    if src_lang != "EN":
-        return None  # MW only for English source words
-
-    # 1) Check cache
-    cached = db_get_mw_definitions(conn, term, src_lang)
-    if cached:
-        return {
-            "noun": cached["noun"],
-            "verb": cached["verb"],
-            "adjective": cached["adjective"],
-            "adverb": cached["adverb"],
-            "other": cached["other"],
-        }
-
-    # 2) Call API
-    data, err = mw_call(term)
-    if err or not data:
+def mw_fetch(term: str, src_lang: str) -> dict | None:
+    """Fetch Merriam-Webster definitions from API and return defs dict for caching."""
+    if (src_lang or "").upper() != "EN":
         return None
 
     data, err = mw_call(term)
     if err or not data:
-    # временный дебаг
-        print(f"[MW DEBUG] term={term!r} err={err!r}", file=sys.stderr)
         return None
-
 
     defs_by_pos = mw_extract_definitions(data)
-    # If everything is empty, don't store
-    if not any(defs_by_pos.values()):
+    if not defs_by_pos or not any(defs_by_pos.values()):
         return None
 
-    now = now_str()
-    raw_json = json.dumps(data, ensure_ascii=False)
-    db_upsert_mw_definitions(conn, term, src_lang, defs_by_pos, raw_json, now)
+    defs_by_pos = dict(defs_by_pos)
+    defs_by_pos["raw_json"] = json.dumps(data, ensure_ascii=False)
     return defs_by_pos
 
 def pick_training_word(dict_base_path: str, src_filter: str | None = None):
@@ -502,7 +275,7 @@ def translate_word(
         deepl_call=deepl_call,
         normalize_src_lang=normalize_src_lang,
         ctx_hash=ctx_hash,
-        mw_fetch=None,  # TODO: wire MW fetcher later
+        mw_fetch=mw_fetch,
     )
 
     services = build_services(
@@ -533,7 +306,7 @@ def translate_selection(
         deepl_call=deepl_call,
         normalize_src_lang=normalize_src_lang,
         ctx_hash=ctx_hash,
-        mw_fetch=None,  # TODO: wire MW fetcher later
+        mw_fetch=mw_fetch,
     )
 
     services = build_services(
