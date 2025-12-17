@@ -30,6 +30,7 @@ class Services:
 def build_services(
     dict_base_path: str,
     *,
+    cfg,
     recent_days: int,
     mastery_count: int,
     translation_hooks: Optional[TranslationHooks] = None,
@@ -42,7 +43,6 @@ def build_services(
       - create repos
       - create services
     """
-    cfg = load_config()
     db_path = resolve_db_path(dict_base_path, cfg.db_path)
 
     sqlite = SQLiteRepo(db_path)
