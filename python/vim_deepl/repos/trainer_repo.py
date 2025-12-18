@@ -173,3 +173,153 @@ class TrainerRepo:
 			),
 		)
 
+    def _list_due_entries_conn(self, conn, src_langs: list[str], now_ts: int, limit: int) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in src_langs)
+        sql = f"""
+        SELECT c.id AS card_id, c.entry_id,
+            c.due_at, c.lapses, c.wrong_streak,
+            e.word, e.translation, e.src_lang
+        FROM training_cards c
+        JOIN entries e ON e.id = c.entry_id
+        WHERE c.suspended = 0
+        AND c.entry_id IS NOT NULL
+        AND c.due_at IS NOT NULL AND c.due_at <= ?
+        AND e.src_lang IN ({placeholders})
+        ORDER BY c.due_at ASC, c.lapses DESC, c.wrong_streak DESC
+        LIMIT ?
+        """
+        args = [now_ts, *src_langs, limit]
+        rows = conn.execute(sql, args).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    def _list_new_entries_conn(self, conn, src_langs: list[str], limit: int) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in src_langs)
+        sql = f"""
+		SELECT e.id AS entry_id, e.word, e.translation, e.src_lang
+		FROM entries e
+		LEFT JOIN training_cards c ON c.entry_id = e.id
+		WHERE e.src_lang IN ({placeholders})
+		  AND c.id IS NULL
+		ORDER BY RANDOM()
+		LIMIT ?
+		"""
+        args = [*src_langs, limit]
+        rows = conn.execute(sql, args).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    def _list_hard_entries_conn(self, conn, src_langs: list[str], limit: int) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in src_langs)
+        sql = f"""
+        SELECT c.id AS card_id, c.entry_id,
+		       c.lapses, c.wrong_streak, c.last_review_at,
+		       e.word, e.translation, e.src_lang
+		FROM training_cards c
+		JOIN entries e ON e.id = c.entry_id
+		WHERE c.suspended = 0
+		  AND c.entry_id IS NOT NULL
+		  AND e.src_lang IN ({placeholders})
+		ORDER BY c.lapses DESC, c.wrong_streak DESC, COALESCE(c.last_review_at, 0) ASC
+		LIMIT ?
+		"""
+        args = [*src_langs, limit]
+        rows = conn.execute(sql, args).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    def _ensure_card_for_entry_conn(self, conn, entry_id: int, now_ts: int) -> int:
+        row = conn.execute("SELECT id FROM training_cards WHERE entry_id=?", (entry_id,)).fetchone()
+        if row:
+            return row["id"]
+
+        conn.execute(
+            "INSERT INTO training_cards(entry_id, due_at) VALUES(?, ?)",
+            (entry_id, now_ts),
+        )
+        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+    def _list_due_entries_conn(self, conn, src_langs: list[str], now_ts: int, limit: int) -> list[dict[str, Any]]:
+        ph = ",".join("?" for _ in src_langs)
+        sql = f"""
+        SELECT
+			c.id   AS card_id,
+			e.id   AS entry_id,
+			e.term,
+			e.translation,
+			e.src_lang,
+			e.dst_lang,
+			c.due_at,
+			c.lapses,
+			c.wrong_streak
+		FROM training_cards c
+		JOIN entries e ON e.id = c.entry_id
+		WHERE c.suspended = 0
+		  AND c.entry_id IS NOT NULL
+		  AND c.due_at IS NOT NULL AND c.due_at <= ?
+		  AND e.ignore = 0
+		  AND e.src_lang IN ({ph})
+		ORDER BY c.due_at ASC, c.lapses DESC, c.wrong_streak DESC
+		LIMIT ?
+		"""
+        rows = conn.execute(sql, (now_ts, *src_langs, limit)).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    def _list_new_entries_conn(self, conn, src_langs: list[str], limit: int) -> list[dict[str, Any]]:
+        ph = ",".join("?" for _ in src_langs)
+        sql = f"""
+        SELECT
+			e.id AS entry_id,
+			e.term,
+			e.translation,
+			e.src_lang,
+			e.dst_lang
+		FROM entries e
+		LEFT JOIN training_cards c ON c.entry_id = e.id
+		WHERE e.ignore = 0
+		  AND e.src_lang IN ({ph})
+		  AND c.id IS NULL
+		ORDER BY RANDOM()
+		LIMIT ?
+		"""
+        rows = conn.execute(sql, (*src_langs, limit)).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    def _list_hard_entries_conn(self, conn, src_langs: list[str], limit: int) -> list[dict[str, Any]]:
+        ph = ",".join("?" for _ in src_langs)
+        sql = f"""
+        SELECT
+			c.id AS card_id,
+			e.id AS entry_id,
+			e.term,
+			e.translation,
+			e.src_lang,
+			e.dst_lang,
+			c.lapses,
+			c.wrong_streak,
+			c.last_review_at
+		FROM training_cards c
+		JOIN entries e ON e.id = c.entry_id
+		WHERE c.suspended = 0
+		  AND c.entry_id IS NOT NULL
+		  AND e.ignore = 0
+		  AND e.src_lang IN ({ph})
+		ORDER BY c.lapses DESC, c.wrong_streak DESC, COALESCE(c.last_review_at, 0) ASC
+		LIMIT ?
+		"""
+        rows = conn.execute(sql, (*src_langs, limit)).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    def _ensure_card_for_entry_conn(self, conn, entry_id: int, now_ts: int) -> int:
+        row = conn.execute("SELECT id FROM training_cards WHERE entry_id=?", (entry_id,)).fetchone()
+        if row:
+            return row["id"]
+
+        try:
+            conn.execute("INSERT INTO training_cards(entry_id, due_at) VALUES(?, ?)", (entry_id, now_ts))
+        except Exception:
+			# на случай гонки/unique
+            row2 = conn.execute("SELECT id FROM training_cards WHERE entry_id=?", (entry_id,)).fetchone()
+            if row2:
+                return row2["id"]
+            raise
+
+        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+

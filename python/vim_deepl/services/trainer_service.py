@@ -65,6 +65,7 @@ class TrainerConfig:
     recent_days: int
     mastery_count: int
     recent_ratio: float = 0.7
+    srs_new_ratio: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,40 @@ class TrainerService:
           - return response dict (without ok/fail wrapper)
         parse_dt is injected from existing helper to preserve date parsing behavior.
         """
+        # --- SRS picker (v3) ---
+        src_langs = [src_filter] if src_filter else ["EN"]  # подстрой: как у тебя сейчас формируется список
+        now_ts = int(now.timestamp())
+
+        with self.repo.db.tx() as conn:
+            ensure_schema(conn)
+            conn.row_factory = sqlite3.Row
+
+            due = self.repo._list_due_entries_conn(conn, src_langs, now_ts, limit=1)
+            if due:
+                item = due[0]
+                item["mode"] = "srs_due"
+                return item
+
+            import random
+            pick_new = random.random() < float(getattr(self.cfg, "srs_new_ratio", 0.2))
+
+            if pick_new:
+                new_items = self.repo._list_new_entries_conn(conn, src_langs, limit=1)
+                if new_items:
+                    item = new_items[0]
+                    card_id = self.repo._ensure_card_for_entry_conn(conn, item["entry_id"], now_ts)
+                    item["card_id"] = card_id
+                    item["mode"] = "srs_new"
+                    return item
+
+            hard = self.repo._list_hard_entries_conn(conn, src_langs, limit=1)
+            if hard:
+                item = hard[0]
+                item["mode"] = "srs_hard"
+                return item
+
+        # --- fallback to existing logic (your current implementation) ---
+
         src_filter_u = (src_filter or "").upper()
         if src_filter_u in ("EN", "DA"):
             src_langs = [src_filter_u]

@@ -21,6 +21,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # Example:
     # conn.execute("""CREATE TABLE IF NOT EXISTS ...""")
     # conn.execute("""CREATE INDEX IF NOT EXISTS ...""")
+
+    #   CREATE TABLE training_cards
+    #   CREATE TABLE training_reviews
+    #   ensure_columns(training_cards...)
+    #   ensure_columns(training_reviews...)
+    #   CREATE INDEX ...
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS entries (
@@ -39,6 +46,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_entries_src_ignore
@@ -87,6 +95,17 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
          )
          """
     )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS training_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER,
+            ts INTEGER,
+            grade INTEGER,
+            day TEXT
+        )
+    """)
+
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_entries_ctx_lookup
@@ -95,6 +114,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
     # --- Trainer SRS extensions (v3) ---
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS training_cards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT
+        )
+    """)
+
     ensure_columns(conn, "training_cards", {
         "reps": "INTEGER DEFAULT 0",
         "lapses": "INTEGER DEFAULT 0",
@@ -106,27 +131,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "correct_streak": "INTEGER DEFAULT 0",
         "wrong_streak": "INTEGER DEFAULT 0",
         "suspended": "INTEGER DEFAULT 0",
+        "entry_id": "INTEGER",
     })
 
     ensure_columns(conn, "training_reviews", {
         "day": "TEXT",
     })
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS training_cards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT
-        )
-    """)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS training_reviews (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            card_id INTEGER,
-            ts INTEGER,
-            grade INTEGER,
-            day TEXT
-        )
-    """)
 
 
 def table_exists(conn, table: str) -> bool:
@@ -153,3 +163,5 @@ def ensure_columns(conn, table: str, columns: dict[str, str]) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_last_review ON training_cards(last_review_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_card_ts ON training_reviews(card_id, ts)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_day ON training_reviews(day)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_training_cards_entry_id ON training_cards(entry_id)")
+
