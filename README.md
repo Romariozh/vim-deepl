@@ -20,7 +20,9 @@ See the [LICENSE] file for the full text.
 - Short selections (1–3 words) become vocabulary units
 - Long selections (4+ words) open a history window
 - Dictionary stored locally and reused offline
-- Trainer window to learn weakest items first
+- Trainer window with SRS (spaced repetition): due → new → hard
+- Daily progress: today count + streak
+- Context-aware training: uses original text snippet when available
 - Multi-language support (EN ⇄ DA → RU)
 - Key mappings for fast workflow
 
@@ -64,6 +66,61 @@ Plug 'Romariozh/vim-deepl'
                 │       vocab.db         │
                 │   (SQLite dictionary)  │
                 └────────────────────────┘
+
+## Trainer (SRS)
+
+The project includes a vocabulary trainer based on SRS (spaced repetition) built on top of `entries` + `training_*` tables.
+
+### Data model
+
+- `entries` — vocabulary items (`term`, `translation`, `src_lang`, `dst_lang`, `ignore`, `hard`, ...).
+- `detected_raw` is treated as the original context (if present).
+
+- `training_cards` — SRS state per vocabulary item.
+- link: `training_cards.entry_id -> entries.id` (unique)
+- main fields: `reps`, `lapses`, `ef`, `interval_days`, `due_at`,
+  `last_review_at`, `last_grade`, `correct_streak`, `wrong_streak`, `suspended`
+
+- `training_reviews` — review log.
+- fields: `card_id`, `ts`, `grade`, `day`
+
+### Picking the next training item
+
+Implemented inside `TrainerService.pick_training_word()` (SRS picker v3):
+
+1) **due**: pick items with `due_at <= now` first  
+2) if no due items:
+   - pick **new** (an `entries` row without a card yet) with probability `cfg.srs_new_ratio`
+   - otherwise pick **hard** (highest `lapses` / `wrong_streak`)
+3) ignored items are excluded: `entries.ignore = 1`
+4) when a new entry is picked for the first time, a card is created:
+   `training_cards(entry_id, due_at=now)`
+
+The returned dict typically includes:
+- `card_id`, `entry_id`, `term`, `translation`, `src_lang`, `dst_lang`
+- `mode`: `srs_due` / `srs_new` / `srs_hard`
+- daily progress: `day`, `today_done`, `streak_days`
+- context: `context_raw` (from `entries.detected_raw`, if available)
+
+### Reviewing (grading) an answer
+
+`TrainerService.review_training_card(card_id, grade, now)`:
+- inserts a row into `training_reviews`
+- updates the SRS state in `training_cards`
+
+`grade` is in range `0..5`.
+
+### Daily progress / streak
+
+Computed from `training_reviews.day`:
+- `today_done` — number of reviews for the current date
+- `streak_days` — consecutive days (including today) with at least one review
+
+### Checks before pushing
+
+#bash
+python3 -m compileall -q ./python
+PYTHONPATH=./python pytest -q
 
 ### Flow Summary
 
