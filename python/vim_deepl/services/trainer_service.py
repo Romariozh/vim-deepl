@@ -73,6 +73,7 @@ class TrainerService:
     repo: TrainerRepo
     cfg: TrainerConfig
 
+
     def pick_training_word(self, src_filter: Optional[str], now: datetime, now_s: str, parse_dt) -> Dict[str, Any]:
         """
         Pure business logic + repo calls:
@@ -86,6 +87,15 @@ class TrainerService:
         src_langs = [src_filter] if src_filter else ["EN"]  # подстрой: как у тебя сейчас формируется список
         now_ts = int(now.timestamp())
 
+        def finalize(item: Dict[str, Any]) -> Dict[str, Any]:
+            progress = self.get_progress(now)
+            item.update(progress)
+
+            if item.get("detected_raw"):
+                item["context_raw"] = item["detected_raw"]
+
+            return item
+
         with self.repo.db.tx() as conn:
             ensure_schema(conn)
             conn.row_factory = sqlite3.Row
@@ -94,7 +104,7 @@ class TrainerService:
             if due:
                 item = due[0]
                 item["mode"] = "srs_due"
-                return item
+                return finalize(item)
 
             import random
             pick_new = random.random() < float(getattr(self.cfg, "srs_new_ratio", 0.2))
@@ -106,13 +116,13 @@ class TrainerService:
                     card_id = self.repo._ensure_card_for_entry_conn(conn, item["entry_id"], now_ts)
                     item["card_id"] = card_id
                     item["mode"] = "srs_new"
-                    return item
+                    return finalize(item)
 
             hard = self.repo._list_hard_entries_conn(conn, src_langs, limit=1)
             if hard:
                 item = hard[0]
                 item["mode"] = "srs_hard"
-                return item
+                return finalize(item)
 
         # --- fallback to existing logic (your current implementation) ---
 
@@ -190,6 +200,7 @@ class TrainerService:
             "error": None,
         }
 
+
     def review_training_card(self, card_id: int, grade: int, now: datetime) -> Dict[str, Any]:
         if not (0 <= grade <= 5):
             raise ValueError("grade must be in range 0..5")
@@ -214,3 +225,23 @@ class TrainerService:
 
             return srs
 
+    def get_progress(self, now: datetime) -> Dict[str, Any]:
+        day = now.date().isoformat()
+
+        with self.repo.db.tx() as conn:
+            ensure_schema(conn)
+            conn.row_factory = sqlite3.Row
+
+            today_done = self.repo._count_reviews_for_day_conn(conn, day)
+            days = self.repo._list_active_days_desc_conn(conn)
+
+        # streak: сколько подряд дней до today включительно, где были reviews
+        from datetime import date as _date
+        active = set(days)
+        streak = 0
+        cur = _date.fromisoformat(day)
+        while cur.isoformat() in active:
+            streak += 1
+            cur = cur.fromordinal(cur.toordinal() - 1)
+
+        return {"day": day, "today_done": today_done, "streak_days": streak}

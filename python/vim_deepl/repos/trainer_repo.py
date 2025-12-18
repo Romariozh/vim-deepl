@@ -178,7 +178,7 @@ class TrainerRepo:
         sql = f"""
         SELECT c.id AS card_id, c.entry_id,
             c.due_at, c.lapses, c.wrong_streak,
-            e.word, e.translation, e.src_lang
+            e.word, e.translation, e.src_lang, e.detected_raw
         FROM training_cards c
         JOIN entries e ON e.id = c.entry_id
         WHERE c.suspended = 0
@@ -245,6 +245,7 @@ class TrainerRepo:
 			e.term,
 			e.translation,
 			e.src_lang,
+            e.detected_raw,
 			e.dst_lang,
 			c.due_at,
 			c.lapses,
@@ -322,4 +323,25 @@ class TrainerRepo:
             raise
 
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    def _count_reviews_for_day_conn(self, conn, day: str) -> int:
+        row = conn.execute(
+			"SELECT COUNT(*) AS c FROM training_reviews WHERE day = ?",
+			(day,),
+		).fetchone()
+        return int(row["c"] or 0)
+
+    def _list_active_days_desc_conn(self, conn, limit: int = 400) -> list[str]:
+        rows = conn.execute(
+			"""
+			SELECT day
+			FROM training_reviews
+			WHERE day IS NOT NULL
+			GROUP BY day
+			HAVING COUNT(*) > 0
+			ORDER BY day DESC
+			LIMIT ?
+			""",
+			(limit,),
+		).fetchall()
+        return [r["day"] for r in rows]
 
