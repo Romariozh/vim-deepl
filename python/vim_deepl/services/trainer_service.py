@@ -6,10 +6,59 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import random
+import sqlite3
 from typing import Any, Dict, List, Optional
+from vim_deepl.repos.schema import ensure_schema
+import time
 
 from vim_deepl.repos.trainer_repo import TrainerRepo
 
+def _update_ef(ef: float, grade: int) -> float:
+    ef = ef + (0.1 - (5 - grade) * (0.08 + (5 - grade) * 0.02))
+    return max(1.3, ef)
+
+def _next_interval_days(reps: int, prev_interval: int, ef: float) -> int:
+    if reps <= 1:
+        return 1
+    if reps == 2:
+        return 3
+    return max(1, int(round(prev_interval * ef)))
+
+def compute_srs(card: Dict[str, Any], grade: int, now_ts: int) -> Dict[str, Any]:
+    reps = int(card.get("reps") or 0)
+    lapses = int(card.get("lapses") or 0)
+    ef = float(card.get("ef") or 2.5)
+    interval_days = int(card.get("interval_days") or 0)
+    correct_streak = int(card.get("correct_streak") or 0)
+    wrong_streak = int(card.get("wrong_streak") or 0)
+
+    if grade < 3:
+        lapses += 1
+        reps = 0
+        interval_days = 1
+        ef = _update_ef(ef, grade)
+        due_at = now_ts + 86400
+        wrong_streak += 1
+        correct_streak = 0
+    else:
+        reps += 1
+        ef = _update_ef(ef, grade)
+        interval_days = _next_interval_days(reps, max(1, interval_days), ef)
+        due_at = now_ts + interval_days * 86400
+        correct_streak += 1
+        wrong_streak = 0
+
+    return {
+        "reps": reps,
+        "lapses": lapses,
+        "ef": ef,
+        "interval_days": interval_days,
+        "due_at": due_at,
+        "last_review_at": now_ts,
+        "last_grade": grade,
+        "correct_streak": correct_streak,
+        "wrong_streak": wrong_streak,
+    }
 
 @dataclass(frozen=True)
 class TrainerConfig:
@@ -105,3 +154,28 @@ class TrainerService:
             },
             "error": None,
         }
+
+    def review_training_card(self, card_id: int, grade: int, now: datetime) -> Dict[str, Any]:
+        if not (0 <= grade <= 5):
+            raise ValueError("grade must be in range 0..5")
+
+        now_ts = int(now.timestamp())
+        day = now.date().isoformat()
+
+        with self.repo.db.tx() as conn:
+            ensure_schema(conn)
+            conn.row_factory = sqlite3.Row
+
+            card = self.repo._get_training_card_conn(conn, card_id)
+            if not card:
+                raise ValueError(f"training_card not found: id={card_id}")
+            if int(card.get("suspended") or 0) == 1:
+                raise ValueError(f"training_card suspended: id={card_id}")
+
+            srs = compute_srs(card, grade, now_ts)
+
+            self.repo._insert_training_review_conn(conn, card_id, now_ts, grade, day)
+            self.repo._update_training_card_srs_conn(conn, card_id, srs)
+
+            return srs
+
