@@ -43,6 +43,7 @@ let g:deepl_trainer_current = {}
 
 " -------------------------------------------------------
 " Utility: clear command-line message
+
 function! ClearTranslation(timer_id) abort
   echo ''
   redraw!
@@ -50,6 +51,7 @@ endfunction
 
 " -------------------------------------------------------
 " Cycle target language
+
 function! deepl#cycle_target_lang() abort
   let l:list = g:deepl_lang_cycle
   let l:idx = index(l:list, g:deepl_target_lang)
@@ -63,6 +65,7 @@ endfunction
 
 " -------------------------------------------------------
 "  The single access to target/src_hint
+
 function! deepl#TargetLang() abort
   return get(g:, 'deepl_target_lang', 'RU')
 endfunction
@@ -83,6 +86,7 @@ endfunction
 
 " -------------------------------------------------------
 " Popup helper for word translations
+
 if has('popupwin')
   function! s:DeepLShowPopup(msg) abort
     " Close previous popup if it is still open
@@ -132,6 +136,7 @@ endfunction
 
 " -------------------------------------------------------
 " Statusline indicator for DeepL (variant 1: last word)
+
 function! DeepLStatusWord() abort
   " If there is no last translated word — return empty string
   if !exists('g:deepl_last_word')
@@ -152,6 +157,7 @@ endfunction
 " -------------------------------------------------------
 " DeepL status: current target language for lightline
 " (this overrides any previous DeepLStatus definition)
+
 function! deepl#status() abort
   if !exists('g:deepl_target_lang') || empty(g:deepl_target_lang)
     return ''
@@ -729,6 +735,7 @@ let l:src_label = l:from_cache ? 'Dictionary' : 'DeepL API'
 
   call s:deepl_show_defs_buffer(l:lines, '-  MW  -')
 endfunction
+
 " -------------------------------------------------------
 " Internal helper: show list of lines in a popup or preview window
 function! s:deepl_show_defs_buffer(lines, title) abort
