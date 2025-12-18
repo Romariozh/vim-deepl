@@ -67,11 +67,31 @@ Plug 'Romariozh/vim-deepl'
 
 ### Flow Summary
 
-1. Vim sends translation/training requests via HTTP
-2. FastAPI receives request and dispatches to Python logic
-3. `deepl_helper.py` reads/writes entries in `vocab.db`
-4. SQLite stores translations, usage stats, training metadata
-5. Vim displays results in popup or translation window
+- Vim sends translation/training requests via HTTP
+- FastAPI receives request and dispatches to Python logic
+- `deepl_helper.py` reads/writes entries in `vocab.db`
+- SQLite stores translations, usage stats, training metadata
+- Vim displays results in popup or translation window
+
+### Local API (FastAPI)
+
+Env:
+- DEEPL_API_KEY=...
+- MW_SD3_API_KEY=...
+
+Run (systemd):
+sudo systemctl daemon-reload
+sudo systemctl restart vim-dict.service
+sudo journalctl -u vim-dict.service -f
+
+Examples:
+curl -s http://127.0.0.1:8787/translate/word \
+  -H 'Content-Type: application/json' \
+  -d '{"term":"banana","target_lang":"RU","src_hint":"EN","context":"I went to the store yesterday."}'
+
+curl -s http://127.0.0.1:8787/translate/selection \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"hello world","target_lang":"RU","src_hint":"EN"}'
 
 ### New features
 

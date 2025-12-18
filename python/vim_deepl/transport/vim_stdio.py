@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LGPL-3.0-only
+# Copyright (c) 2025 Romariozh
+
 from __future__ import annotations
 
 import json
