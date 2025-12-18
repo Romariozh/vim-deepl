@@ -94,3 +94,62 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # --- Trainer SRS extensions (v3) ---
+    ensure_columns(conn, "training_cards", {
+        "reps": "INTEGER DEFAULT 0",
+        "lapses": "INTEGER DEFAULT 0",
+        "ef": "REAL DEFAULT 2.5",
+        "interval_days": "INTEGER DEFAULT 0",
+        "due_at": "INTEGER",
+        "last_review_at": "INTEGER",
+        "last_grade": "INTEGER",
+        "correct_streak": "INTEGER DEFAULT 0",
+        "wrong_streak": "INTEGER DEFAULT 0",
+        "suspended": "INTEGER DEFAULT 0",
+    })
+
+    ensure_columns(conn, "training_reviews", {
+        "day": "TEXT",
+    })
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS training_cards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS training_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER,
+            ts INTEGER,
+            grade INTEGER,
+            day TEXT
+        )
+    """)
+
+
+def table_exists(conn, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def ensure_columns(conn, table: str, columns: dict[str, str]) -> None:
+    if not table_exists(conn, table):
+        return
+
+    cur = conn.execute(f"PRAGMA table_info({table})")
+    existing = {row[1] for row in cur.fetchall()}  # row[1] = column name
+
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_due ON training_cards(due_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_hard ON training_cards(lapses, wrong_streak)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_last_review ON training_cards(last_review_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_card_ts ON training_reviews(card_id, ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_day ON training_reviews(day)")
