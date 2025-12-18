@@ -10,6 +10,7 @@ import sqlite3
 from typing import Any, Dict, List, Optional
 from vim_deepl.repos.schema import ensure_schema
 import time
+from datetime import timezone
 
 from vim_deepl.repos.trainer_repo import TrainerRepo
 
@@ -139,10 +140,10 @@ class TrainerService:
         entries: List[Dict[str, Any]] = []
         for row in rows:
             last_str = row.get("last_used") or row.get("created_at") or "1970-01-01 00:00:00"
-            date_dt = parse_dt(row.get("created_at") or last_str)
+            date_dt = parse_dt(row["created_at"])
             last_dt = parse_dt(last_str)
 
-            age_days = (now - date_dt).days
+            age_days = (now.date() - date_dt.date()).days
             bucket = "recent" if age_days <= self.cfg.recent_days else "old"
 
             entries.append(
@@ -177,17 +178,31 @@ class TrainerService:
         if not_mastered:
             pool = not_mastered
 
-        pool.sort(key=lambda e: (e["count"], -e["hard"], e["last"]))
+        for it in pool:
+            last_dt = parse_dt(it["last_used"]) if it.get("last_used") else None
+            if last_dt and last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            it["last_ts"] = int(last_dt.timestamp()) if last_dt else 0
+
+        pool.sort(key=lambda e: (e["count"], -e["hard"], e["last_ts"]))
         chosen = pool[0]
 
         self.repo.touch_usage(chosen["id"], now_s)
 
-        return {
-            "type": "train",
-            "word": chosen["word"],
+        # ensure card exists so UI/review can work uniformly
+        with self.repo.db.tx() as conn:
+            ensure_schema(conn)
+            conn.row_factory = sqlite3.Row
+            card_id = self.repo._ensure_card_for_entry_conn(conn, chosen["id"], now_ts)
+
+        item = {
+            "mode": "fallback",
+            "card_id": card_id,
+            "entry_id": chosen["id"],
+            "term": chosen["word"],
             "translation": chosen["translation"],
             "src_lang": chosen["src"],
-            "target_lang": chosen["target_lang"],
+            "dst_lang": chosen["target_lang"],
             "timestamp": now_s,
             "count": chosen["count"] + 1,
             "hard": chosen["hard"],
@@ -197,9 +212,8 @@ class TrainerService:
                 "mastery_threshold": self.cfg.mastery_count,
                 "mastery_percent": mastery_percent,
             },
-            "error": None,
         }
-
+        return finalize(item)
 
     def review_training_card(self, card_id: int, grade: int, now: datetime) -> Dict[str, Any]:
         if not (0 <= grade <= 5):

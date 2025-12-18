@@ -9,6 +9,8 @@ from typing import Iterable, List, Dict, Any
 from vim_deepl.repos.schema import ensure_schema
 from vim_deepl.repos.sqlite_repo import SQLiteRepo
 
+import sqlite3
+
 
 @dataclass(frozen=True)
 class TrainerRepo:
@@ -72,8 +74,9 @@ class TrainerRepo:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """
-                SELECT id, reps, lapses, ef, interval_days, due_at,
-                    last_review_at, last_grade, correct_streak, wrong_streak, suspended
+                SELECT id, entry_id, src_lang,
+                       reps, lapses, ef, interval_days, due_at,
+                       last_review_at, last_grade, correct_streak, wrong_streak, suspended
                 FROM training_cards
                 WHERE id = ?
                 """,
@@ -136,13 +139,55 @@ class TrainerRepo:
         return dict(row) if row else None
 
     def _insert_training_review_conn(self, conn, card_id: int, ts: int, grade: int, day: str) -> None:
-        conn.execute(
-			"""
-			INSERT INTO training_reviews(card_id, ts, grade, day)
-			VALUES(?, ?, ?, ?)
-			""",
-			(card_id, ts, grade, day),
-		)
+        # required for some schemas
+        row = conn.execute("SELECT entry_id FROM training_cards WHERE id=?", (card_id,)).fetchone()
+        entry_id = row["entry_id"] if row else None
+
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(training_reviews)").fetchall()}
+
+        insert_cols = []
+        insert_vals = []
+
+        # common
+        if "entry_id" in cols:
+            if entry_id is None:
+                raise ValueError(f"training_cards missing for card_id={card_id}")
+            insert_cols.append("entry_id")
+            insert_vals.append(entry_id)
+
+        if "card_id" in cols:
+            insert_cols.append("card_id")
+            insert_vals.append(card_id)
+
+        if "ts" in cols:
+            insert_cols.append("ts")
+            insert_vals.append(ts)
+
+        if "reviewed_at" in cols:
+            # real vocab.db requires this NOT NULL
+            insert_cols.append("reviewed_at")
+            insert_vals.append(ts)
+
+        if "grade" in cols:
+            insert_cols.append("grade")
+            insert_vals.append(grade)
+
+        if "day" in cols:
+            insert_cols.append("day")
+            insert_vals.append(day)
+
+        # fallback: if this is our minimal schema and we didn't detect columns
+        if not insert_cols:
+            conn.execute(
+                "INSERT INTO training_reviews(card_id, ts, grade, day) VALUES(?, ?, ?, ?)",
+                (card_id, ts, grade, day),
+            )
+            return
+
+        cols_sql = ", ".join(insert_cols)
+        qs_sql = ", ".join(["?"] * len(insert_cols))
+        sql = f"INSERT INTO training_reviews({cols_sql}) VALUES({qs_sql})"
+        conn.execute(sql, tuple(insert_vals))
 
     def _update_training_card_srs_conn(self, conn, card_id: int, s: Dict[str, Any]) -> None:
         conn.execute(
@@ -225,17 +270,6 @@ class TrainerRepo:
         rows = conn.execute(sql, args).fetchall()
         return [{k: r[k] for k in r.keys()} for r in rows]
 
-    def _ensure_card_for_entry_conn(self, conn, entry_id: int, now_ts: int) -> int:
-        row = conn.execute("SELECT id FROM training_cards WHERE entry_id=?", (entry_id,)).fetchone()
-        if row:
-            return row["id"]
-
-        conn.execute(
-            "INSERT INTO training_cards(entry_id, due_at) VALUES(?, ?)",
-            (entry_id, now_ts),
-        )
-        return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-
     def _list_due_entries_conn(self, conn, src_langs: list[str], now_ts: int, limit: int) -> list[dict[str, Any]]:
         ph = ",".join("?" for _ in src_langs)
         sql = f"""
@@ -313,16 +347,50 @@ class TrainerRepo:
         if row:
             return row["id"]
 
+        # какие колонки реально есть в training_cards (test db vs real vocab.db)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(training_cards)").fetchall()}
+
+        needs_src = "src_lang" in cols
+        has_created = "created_at" in cols
+        has_updated = "updated_at" in cols
+
+        src_lang = None
+        if needs_src:
+            e = conn.execute("SELECT src_lang FROM entries WHERE id=?", (entry_id,)).fetchone()
+            if not e:
+                raise ValueError(f"entry not found: id={entry_id}")
+            src_lang = e["src_lang"]
+
+        # собрать INSERT динамически
+        insert_cols = ["entry_id", "due_at"]
+        insert_vals = [entry_id, now_ts]
+
+        if needs_src:
+            insert_cols.insert(1, "src_lang")
+            insert_vals.insert(1, src_lang)
+
+        if has_created:
+            insert_cols.append("created_at")
+            insert_vals.append(now_ts)
+        if has_updated:
+            insert_cols.append("updated_at")
+            insert_vals.append(now_ts)
+
+        cols_sql = ", ".join(insert_cols)
+        qs_sql = ", ".join(["?"] * len(insert_cols))
+        sql = f"INSERT INTO training_cards({cols_sql}) VALUES({qs_sql})"
+
         try:
-            conn.execute("INSERT INTO training_cards(entry_id, due_at) VALUES(?, ?)", (entry_id, now_ts))
+            conn.execute(sql, tuple(insert_vals))
         except Exception:
-			# на случай гонки/unique
+            # на случай гонки/unique
             row2 = conn.execute("SELECT id FROM training_cards WHERE entry_id=?", (entry_id,)).fetchone()
             if row2:
                 return row2["id"]
             raise
 
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
     def _count_reviews_for_day_conn(self, conn, day: str) -> int:
         row = conn.execute(
 			"SELECT COUNT(*) AS c FROM training_reviews WHERE day = ?",

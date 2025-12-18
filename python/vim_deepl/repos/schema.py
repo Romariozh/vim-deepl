@@ -135,8 +135,20 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     })
 
     ensure_columns(conn, "training_reviews", {
+        "card_id": "INTEGER",
+        "ts": "INTEGER",
+        "grade": "INTEGER",
         "day": "TEXT",
     })
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_due ON training_cards(due_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_hard ON training_cards(lapses, wrong_streak)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_last_review ON training_cards(last_review_at)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_training_cards_entry_id ON training_cards(entry_id)")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_card_ts ON training_reviews(card_id, ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_day ON training_reviews(day)")
+
 
 
 def table_exists(conn, table: str) -> bool:
@@ -158,10 +170,10 @@ def ensure_columns(conn, table: str, columns: dict[str, str]) -> None:
         if name not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_due ON training_cards(due_at)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_hard ON training_cards(lapses, wrong_streak)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_last_review ON training_cards(last_review_at)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_card_ts ON training_reviews(card_id, ts)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_day ON training_reviews(day)")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_training_cards_entry_id ON training_cards(entry_id)")
+    #conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_due ON training_cards(due_at)")
+    #conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_hard ON training_cards(lapses, wrong_streak)")
+    #conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_last_review ON training_cards(last_review_at)")
+    #conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_card_ts ON training_reviews(card_id, ts)")
+    #conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_day ON training_reviews(day)")
+    #conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_training_cards_entry_id ON training_cards(entry_id)")
 
