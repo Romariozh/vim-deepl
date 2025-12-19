@@ -104,7 +104,8 @@ def dispatch(argv: list[str]) -> dict:
             translation_hooks=hooks,
         )
 
-    elif mode in ("train", "mark_hard", "ignore"):
+    elif mode in ("train", "review", "mark_hard", "ignore"):
+
         dict_base_path = text
         services = build_services(
             dict_base_path,
@@ -151,6 +152,35 @@ def dispatch(argv: list[str]) -> dict:
         result = services.trainer.pick_training_word(
             src_filter=src_filter or None,
             now=datetime.now(),
+            now_s=now_str(),
+            parse_dt=parse_dt,
+        )
+        return _wrap_result(result)
+
+    if mode == "review":
+        if len(argv) < 6:
+            log.warning("review: not enough arguments argv=%s", argv)
+            return _fail("review: not enough arguments", code="ARGS", details={"argv": argv})
+
+        src_filter = argv[3] if len(argv) >= 4 else ""
+        try:
+            card_id = int(argv[4])
+            grade = int(argv[5])
+        except Exception:
+            return _fail("review: card_id and grade must be integers", code="ARGS", details={"argv": argv})
+
+        if grade < 0 or grade > 5:
+            return _fail("review: grade must be in range 0..5", code="ARGS", details={"argv": argv})
+
+        now = datetime.now()
+
+        # Apply review
+        services.trainer.review_training_card(card_id=card_id, grade=grade, now=now)
+
+        # Return next item (same shape as /train/next)
+        result = services.trainer.pick_training_word(
+            src_filter=src_filter or None,
+            now=now,
             now_s=now_str(),
             parse_dt=parse_dt,
         )

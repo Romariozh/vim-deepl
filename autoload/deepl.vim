@@ -343,13 +343,12 @@ function! DeepLTrainerNext() abort
           \ g:deepl_api_base . '/train/next',
           \ ]
   else
-    " Legacy python backend
+    " Local python backend: use trainer_cmd (next)
     let l:cmd = [
           \ 'python3',
-          \ g:deepl_helper_path,
-          \ 'train',
-          \ g:deepl_dict_path_base,
-          \ l:src_filter,
+          \ '-m', 'vim_deepl.tools.trainer_cmd',
+          \ 'next',
+          \ '--src', l:src_filter,
           \ ]
   endif
 
@@ -467,6 +466,63 @@ function! DeepLTrainerIgnore() abort
   call DeepLTrainerNext()
 endfunction
 
+" Review current card with a grade (0..5) and load next item
+function! DeepLTrainerReview(grade) abort
+  if g:deepl_trainer_bufnr <= 0 || !bufexists(g:deepl_trainer_bufnr)
+    echo "Trainer window is not open. Use :DeepLTrainerStart"
+    return
+  endif
+
+  if empty(g:deepl_trainer_current)
+    echo "Trainer: no active item"
+    return
+  endif
+
+  let l:card_id = get(g:deepl_trainer_current, 'card_id', 0)
+  if l:card_id <= 0
+    echo "Trainer: current item has no card_id"
+    return
+  endif
+
+  " Use current source language toggle (EN/DA)
+  if !exists('g:deepl_word_src_lang') || empty(g:deepl_word_src_lang)
+    let l:src_filter = 'EN'
+  else
+    let l:src_filter = g:deepl_word_src_lang
+  endif
+
+  if g:deepl_backend ==# 'http'
+    " HTTP backend: /train/review
+    let l:payload = json_encode({'src_filter': l:src_filter, 'card_id': l:card_id, 'grade': a:grade})
+    let l:cmd = [
+          \ 'curl', '-sS',
+          \ '-X', 'POST',
+          \ '-H', 'Content-Type: application/json',
+          \ '-d', l:payload,
+          \ g:deepl_api_base . '/train/review',
+          \ ]
+  else
+    " Local python backend: trainer_cmd (review -> returns next item)
+    let l:cmd = [
+          \ 'python3',
+          \ '-m', 'vim_deepl.tools.trainer_cmd',
+          \ 'review',
+          \ '--src', l:src_filter,
+          \ '--card-id', string(l:card_id),
+          \ '--grade', string(a:grade),
+          \ ]
+  endif
+
+  call job_start(l:cmd, {
+        \ 'out_cb': function('s:DeepLTrainOut'),
+        \ 'err_cb': function('s:DeepLTrainErr'),
+        \ 'exit_cb': function('s:DeepLTrainExit'),
+        \ 'out_mode': 'raw',
+        \ 'err_mode': 'raw',
+        \ })
+endfunction
+
+
 function! DeepLTrainerShow() abort
   if empty(g:deepl_trainer_current)
     return
@@ -509,6 +565,18 @@ function! deepl#trainer_start() abort
   nnoremap <silent> <buffer> s :call DeepLTrainerShow()<CR>
   nnoremap <silent> <buffer> x :call DeepLTrainerMarkHard()<CR>
   nnoremap <silent> <buffer> d :call DeepLTrainerIgnore()<CR>
+
+  " Grades 0..5 (SRS review)
+  nnoremap <silent> <buffer> 0 :call DeepLTrainerReview(0)<CR>
+  nnoremap <silent> <buffer> 1 :call DeepLTrainerReview(1)<CR>
+  nnoremap <silent> <buffer> 2 :call DeepLTrainerReview(2)<CR>
+  nnoremap <silent> <buffer> 3 :call DeepLTrainerReview(3)<CR>
+  nnoremap <silent> <buffer> 4 :call DeepLTrainerReview(4)<CR>
+  nnoremap <silent> <buffer> 5 :call DeepLTrainerReview(5)<CR>
+
+  " Quick 'again' (alias for grade 0)
+  nnoremap <silent> <buffer> x :call DeepLTrainerReview(0)<CR>
+
 
   setlocal nomodifiable
 

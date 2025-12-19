@@ -56,6 +56,11 @@ class WordRequest(BaseModel):
 class TrainRequest(BaseModel):
     src_filter: Optional[str] = None
 
+class TrainReviewRequest(BaseModel):
+    card_id: int
+    grade: int  # 0..5
+    src_filter: str | None = None
+
 class MarkRequest(BaseModel):
     word: str
     src_filter: str
@@ -64,6 +69,11 @@ class SelectionRequest(BaseModel):
     text: str
     target_lang: str
     src_hint: Optional[str] = ""
+
+class TrainReviewReq(BaseModel):
+    card_id: int
+    grade: int
+    src_filter: Optional[str] = "EN"
 
 
 app = FastAPI(title="Local Dict API")
@@ -149,6 +159,10 @@ def api_train_next(payload: TrainRequest):
     argv = ["dict_api", "train", DICT_BASE, payload.src_filter or ""]
     return _dispatch_data(argv)
 
+@app.post("/train/review")
+def api_train_review(payload: TrainReviewRequest):
+    argv = ["dict_api", "review", DICT_BASE, payload.src_filter or "", str(payload.card_id), str(payload.grade)]
+    return _dispatch_data(argv)
 
 @app.post("/train/mark_hard")
 def api_mark_hard(payload: MarkRequest):
