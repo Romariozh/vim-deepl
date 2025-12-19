@@ -169,6 +169,30 @@ endfunction
 " =======================================================
 " DeepL Trainer 
 " =======================================================
+" Normalize trainer payload coming from backend (SRS v3 + legacy fallback)
+function! s:DeepLTrainerNormalize(res) abort
+  if type(a:res) != type({})
+    return {}
+  endif
+
+  let l:r = copy(a:res)
+
+  " Prefer new keys; fall back to legacy ones
+  if !has_key(l:r, 'term')
+    let l:r.term = get(l:r, 'word', '')
+  endif
+  if !has_key(l:r, 'dst_lang')
+    let l:r.dst_lang = get(l:r, 'target_lang', deepl#TargetLang())
+  endif
+  if !has_key(l:r, 'mode')
+    let l:r.mode = ''
+  endif
+  if !has_key(l:r, 'context_raw')
+    let l:r.context_raw = ''
+  endif
+
+  return l:r
+endfunction
 
 " -------------------------------------------------------
 " Output / error handlers for "train" mode
@@ -186,6 +210,7 @@ function! s:DeepLTrainErr(channel, msg) abort
   endif
 endfunction
 
+" -------------------------------------------------------
 function! s:DeepLTrainExit(channel, status) abort
   let l:json_str = g:deepl_pending_train
   let g:deepl_pending_train = ''
@@ -206,9 +231,7 @@ function! s:DeepLTrainExit(channel, status) abort
     return
   endif
 
-  let g:deepl_trainer_current = l:res
-
-  " 0 = hide translation, only show the word
+  let g:deepl_trainer_current = s:DeepLTrainerNormalize(l:res)
   call DeepLTrainerRender(0)
 endfunction
 
@@ -225,10 +248,13 @@ function! DeepLTrainerRender(show_translation) abort
     return
   endif
 
-  let l:word  = get(l:res, 'word', '')
+  let l:word  = get(l:res, 'term', get(l:res, 'word', ''))
+  let l:lang  = get(l:res, 'dst_lang', get(l:res, 'target_lang', deepl#TargetLang()))
+  let l:mode  = get(l:res, 'mode', '')
+  let l:ctx   = get(l:res, 'context_raw', '')
+
   let l:tr    = get(l:res, 'translation', '')
   let l:src   = get(l:res, 'src_lang', '')
-  let l:lang  = get(l:res, 'target_lang', deepl#TargetLang())
   let l:count = get(l:res, 'count', 0)
   let l:hard  = get(l:res, 'hard', 0)
 
@@ -239,12 +265,21 @@ function! DeepLTrainerRender(show_translation) abort
   let l:percent  = get(l:stats, 'mastery_percent', 0)
 
   let l:filter = exists('g:deepl_word_src_lang') ? g:deepl_word_src_lang : l:src
-
+  let l:mode_suffix = empty(l:mode) ? '' : (' [' . l:mode . ']')
   let l:lines = []
+  " Fallbacks for empty language tags (avoid blank header)
+  let l:filter = empty(l:filter) ? 'EN' : l:filter
+  let l:src = empty(l:src) ? l:filter : l:src
 
-  call add(l:lines, printf('DeepL Trainer (%s → %s) — unit from %s',
-        \ l:filter, l:lang, l:src))
+  call add(l:lines, printf('DeepL Trainer (%s → %s) — unit from %s%s',
+        \ l:filter, l:lang, l:src, l:mode_suffix))
   call add(l:lines, printf('Unit: %s', l:word))
+
+  if !empty(l:ctx)
+    call add(l:lines, '')
+    call add(l:lines, 'Context:')
+    call add(l:lines, '  ' . l:ctx)
+  endif
 
   if a:show_translation
     call add(l:lines, printf('Translation: %s', l:tr))
