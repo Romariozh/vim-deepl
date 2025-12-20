@@ -8,7 +8,6 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from vim_deepl.repos.translation_repo import TranslationRepo
 
-
 # deepl_call(text, target_lang, context="") -> (translation, detected_src, err_string_or_None)
 DeeplCall = Callable[[str, str], Tuple[str, str, Optional[str]]]
 
@@ -78,7 +77,7 @@ class TranslationService:
             if cached:
                 self.repo.touch_ctx_usage(word, src_expected, target_lang, h, now_s)
                 if self.repo.get_base_entry_any_src(word, target_lang) is None:
-                    self.repo.upsert_base_entry(word, cached["translation"], cached["src_lang"], target_lang, "", now_s)
+                    self.repo.upsert_base_entry(word, cached["translation"], cached["src_lang"], target_lang, "", now_s, context=context)
 
                 mw_defs = self._ensure_mw_definitions(word, cached["src_lang"], now_s)
 
@@ -119,7 +118,7 @@ class TranslationService:
             src = self.deps.normalize_src_lang(detected, src_hint)
 
             # write base entry too (so context words are always searchable in base cache)
-            self.repo.upsert_base_entry(word, tr, src, target_lang, detected, now_s)
+            self.repo.upsert_base_entry(word, tr, src, target_lang, detected, now_s, context=context)
 
             # write context entry
             self.repo.upsert_ctx_entry(word, tr, src, target_lang, h, now_s)
@@ -184,7 +183,7 @@ class TranslationService:
             }
 
         src = self.deps.normalize_src_lang(detected, src_hint)
-        self.repo.upsert_base_entry(word, tr, src, target_lang, detected, now_s)
+        self.repo.upsert_base_entry(word, tr, src, target_lang, detected, now_s, context=context)
 
         mw_defs = self._ensure_mw_definitions(word, src, now_s)
 

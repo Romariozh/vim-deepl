@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -11,6 +12,17 @@ from typing import Any, Optional
 from vim_deepl.repos.schema import ensure_schema
 from vim_deepl.repos.sqlite_repo import SQLiteRepo
 
+def _ctx_for_storage(context: str | None) -> str | None:
+    """
+    Normalize and keep context only if it looks like a sentence.
+    We store it into entries.detected_raw as a lightweight solution.
+    """
+    if not context:
+        return None
+    ctx = " ".join(context.split())
+    if re.search(r"\s", ctx) or re.search(r"[.!?,;:]", ctx):
+        return ctx
+    return None
 
 @dataclass(frozen=True)
 class TranslationRepo:
@@ -58,7 +70,11 @@ class TranslationRepo:
         dst_lang: str,
         detected_raw: str,
         now_s: str,
+        context: str | None = None,
     ) -> None:
+        ctx = _ctx_for_storage(context)
+        detected_raw_to_store = ctx if ctx else detected_raw
+
         with self.db.tx() as conn:
             ensure_schema(conn)
             conn.execute(
@@ -74,7 +90,7 @@ class TranslationRepo:
                     last_used    = excluded.last_used,
                     count        = entries.count + 1
                 """,
-                (term, translation, src_lang, dst_lang, detected_raw, now_s, now_s),
+                (term, translation, src_lang, dst_lang, detected_raw_to_store, now_s, now_s),
             )
 
     # -------------------------

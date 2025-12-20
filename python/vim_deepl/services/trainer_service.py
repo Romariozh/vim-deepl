@@ -75,7 +75,7 @@ class TrainerService:
     cfg: TrainerConfig
 
 
-    def pick_training_word(self, src_filter: Optional[str], now: datetime, now_s: str, parse_dt) -> Dict[str, Any]:
+    def pick_training_word(self, src_filter: Optional[str], now: datetime, now_s: str, parse_dt, exclude_card_ids: Optional[list[int]] = None) -> Dict[str, Any]:
         """
         Pure business logic + repo calls:
           - fetch candidates
@@ -84,6 +84,7 @@ class TrainerService:
           - return response dict (without ok/fail wrapper)
         parse_dt is injected from existing helper to preserve date parsing behavior.
         """
+
         # --- SRS picker (v3) ---
         src_langs = [src_filter] if src_filter else ["EN"]  # подстрой: как у тебя сейчас формируется список
         now_ts = int(now.timestamp())
@@ -92,8 +93,16 @@ class TrainerService:
             progress = self.get_progress(now)
             item.update(progress)
 
-            if item.get("detected_raw"):
-                item["context_raw"] = item["detected_raw"]
+            # Keep both keys for backward compatibility
+            ctx = (item.get("context_raw") or "").strip()
+            det = (item.get("detected_raw") or "").strip()
+
+            if not ctx and det:
+                item["context_raw"] = det
+                ctx = det
+
+            if not det and ctx:
+                item["detected_raw"] = ctx
 
             return item
 
@@ -101,7 +110,7 @@ class TrainerService:
             ensure_schema(conn)
             conn.row_factory = sqlite3.Row
 
-            due = self.repo._list_due_entries_conn(conn, src_langs, now_ts, limit=1)
+            due = self.repo._list_due_entries_conn(conn, src_langs, now_ts, limit=1, exclude_card_ids=exclude_card_ids)
             if due:
                 item = due[0]
                 item["mode"] = "srs_due"
@@ -119,7 +128,7 @@ class TrainerService:
                     item["mode"] = "srs_new"
                     return finalize(item)
 
-            hard = self.repo._list_hard_entries_conn(conn, src_langs, limit=1)
+            hard = self.repo._list_hard_entries_conn(conn, src_langs, limit=1, exclude_card_ids=exclude_card_ids)
             if hard:
                 item = hard[0]
                 item["mode"] = "srs_hard"

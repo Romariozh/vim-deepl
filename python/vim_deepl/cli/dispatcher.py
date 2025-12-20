@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
+import json
 
 from vim_deepl.utils.logging import get_logger
 from vim_deepl.services.container import build_services, TranslationHooks
@@ -149,11 +150,22 @@ def dispatch(argv: list[str]) -> dict:
 
     if mode == "train":
         src_filter = argv[3] if len(argv) >= 4 else ""
+
+        exclude_card_ids: list[int] = []
+        if len(argv) >= 5 and argv[4]:
+            try:
+                exclude_card_ids = json.loads(argv[4])
+                if not isinstance(exclude_card_ids, list):
+                    exclude_card_ids = []
+            except Exception:
+                exclude_card_ids = []
+
         result = services.trainer.pick_training_word(
             src_filter=src_filter or None,
             now=datetime.now(),
             now_s=now_str(),
             parse_dt=parse_dt,
+            exclude_card_ids=exclude_card_ids,
         )
         return _wrap_result(result)
 

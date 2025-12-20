@@ -155,3 +155,41 @@ curl -s http://127.0.0.1:8787/translate/selection \
 - Merriam-Webster definitions using **sd3 API endpoint**
 - SQLite tables for storing MW definitions by part of speech
 - DeepL word translation with **context support** for higher accuracy
+
+### Trainer (SRS) — quick cheat sheet
+
+The trainer picks the next card in this order:
+
+1. **Due (SRS due)**
+   - Selects non-suspended cards where `due_at <= now` (milliseconds are normalized to seconds if needed)
+   - Ignores entries with `ignore=1`
+   - Filtered by `src_lang` (e.g. EN/DA)
+   - Sorted by: earliest `due_at` → higher `lapses` → higher `wrong_streak`
+   - `mode: srs_due`
+
+2. **Hard pool**
+   - If nothing is due, selects “hardest” items
+   - Sorted by: higher `lapses` → higher `wrong_streak` → older `last_review_at`
+   - `mode: srs_hard`
+
+3. **New items**
+   - If due/hard pools are empty, picks new entries
+   - `mode: srs_new`
+
+To avoid repeating the same item during a session, the UI can pass an `exclude_card_ids` list to `/train/next`.
+
+#### Grades (0..5)
+
+On review the trainer:
+- writes a row to `training_reviews` (for daily progress & streak)
+- updates SRS fields in `training_cards` (`due_at`, `interval_days`, `ef`, `reps`, `lapses`, `correct_streak`, `wrong_streak`, etc.)
+
+Meaning of grades:
+- **0 — again/fail**: reset progress, schedule very soon (minimal interval), increases `lapses`/`wrong_streak`
+- **1 — hard**: small interval increase, may lower ease (`ef`)
+- **2 — ok**: normal progress
+- **3 — good**: faster interval growth
+- **4 — easy**: strong interval growth
+- **5 — perfect**: maximum interval growth
+
+(Exact intervals are computed by `compute_srs()`.)

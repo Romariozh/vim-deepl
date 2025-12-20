@@ -3,7 +3,8 @@ import sys
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from datetime import datetime, timezone
 
 # Make sure we can import vim_deepl from ./python
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -11,16 +12,18 @@ PYTHON_DIR = os.path.join(BASE_DIR, "python")
 if PYTHON_DIR not in sys.path:
     sys.path.insert(0, PYTHON_DIR)
 
-from vim_deepl.cli.dispatcher import dispatch
+from vim_deepl.cli.dispatcher import load_config, build_services, parse_dt, now_str, dispatch
 from vim_deepl.utils.config import load_config
 from vim_deepl.repos.dict_repo import resolve_db_path
 from vim_deepl.repos.sqlite_repo import SQLiteRepo
 from vim_deepl.repos.schema import ensure_schema
 from vim_deepl.repos.translation_repo import TranslationRepo
+from vim_deepl.services.trainer_service import TrainerConfig
 
 app = FastAPI(title="Local Dict API")
 
 DICT_BASE = os.path.expanduser("~/.local/share/vim-deepl")
+
 
 @app.on_event("startup")
 def _startup() -> None:
@@ -75,6 +78,9 @@ class TrainReviewReq(BaseModel):
     grade: int
     src_filter: Optional[str] = "EN"
 
+class TrainNextRequest(BaseModel):
+    src_filter: str | None = None
+    exclude_card_ids: list[int] = Field(default_factory=list)
 
 app = FastAPI(title="Local Dict API")
 
@@ -155,9 +161,30 @@ def api_translate_selection(payload: SelectionRequest):
 
 
 @app.post("/train/next")
-def api_train_next(payload: TrainRequest):
-    argv = ["dict_api", "train", DICT_BASE, payload.src_filter or ""]
-    return _dispatch_data(argv)
+def api_train_next(payload: TrainNextRequest):
+    cfg = load_config()
+    recent_days = getattr(cfg, "trainer_recent_days", 7)
+    mastery_count = getattr(cfg, "trainer_mastery_count", 7)
+    recent_ratio = getattr(cfg, "trainer_recent_ratio", 0.7)
+
+    services = build_services(
+        DICT_BASE,
+        cfg=cfg,
+        recent_days=recent_days,
+        mastery_count=mastery_count,
+    )
+
+    now = datetime.now(timezone.utc)
+
+    # NOTE: pick_training_word must accept exclude_card_ids and pass it into repo queries
+    result = services.trainer.pick_training_word(
+        src_filter=payload.src_filter or None,
+        now=now,
+        now_s=now_str(),
+        parse_dt=parse_dt,
+        exclude_card_ids=payload.exclude_card_ids,
+    )
+    return result
 
 @app.post("/train/review")
 def api_train_review(payload: TrainReviewRequest):

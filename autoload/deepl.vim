@@ -41,6 +41,14 @@ let g:deepl_trainer_bufnr = -1
 let g:deepl_pending_train = ''
 let g:deepl_trainer_current = {}
 
+" Trainer state
+let g:deepl_trainer_bufnr = -1
+let g:deepl_trainer_current = {}
+
+" Cards excluded for this trainer session (skip list)
+let g:deepl_trainer_exclude = []
+
+
 " -------------------------------------------------------
 " Utility: clear command-line message
 
@@ -232,6 +240,15 @@ function! s:DeepLTrainExit(channel, status) abort
   endif
 
   let g:deepl_trainer_current = s:DeepLTrainerNormalize(l:res)
+
+  " If we just reviewed a card, exclude it for this session to prevent sticking
+  if get(g:, 'deepl_trainer_last_op', '') ==# 'review'
+    let l:rid = get(g:, 'deepl_trainer_last_reviewed_id', 0)
+    if l:rid > 0 && index(g:deepl_trainer_exclude, l:rid) < 0
+      call add(g:deepl_trainer_exclude, l:rid)
+    endif
+  endif
+
   call DeepLTrainerRender(0)
 endfunction
 
@@ -255,8 +272,12 @@ function! DeepLTrainerRender(show_translation) abort
 
   let l:tr    = get(l:res, 'translation', '')
   let l:src   = get(l:res, 'src_lang', '')
+
   let l:count = get(l:res, 'count', 0)
   let l:hard  = get(l:res, 'hard', 0)
+  let l:day = get(l:res, 'day', '')
+  let l:today_done = get(l:res, 'today_done', 0)
+  let l:streak_days = get(l:res, 'streak_days', 0)
 
   let l:stats = get(l:res, 'stats', {})
   let l:total    = get(l:stats, 'total', 0)
@@ -273,45 +294,255 @@ function! DeepLTrainerRender(show_translation) abort
 
   call add(l:lines, printf('DeepL Trainer (%s → %s) — unit from %s%s',
         \ l:filter, l:lang, l:src, l:mode_suffix))
-  call add(l:lines, printf('Unit: %s', l:word))
 
-  if !empty(l:ctx)
-    call add(l:lines, '')
-    call add(l:lines, 'Context:')
-    call add(l:lines, '  ' . l:ctx)
-  endif
-
+  " Unit + Translation on the same line
   if a:show_translation
-    call add(l:lines, printf('Translation: %s', l:tr))
+    let l:unit_line = printf('Unit: %s   Translation: %s', l:word, l:tr)
   else
-    call add(l:lines, 'Translation: ???   (press "s" to show)')
+    let l:unit_line = printf('Unit: %s   Translation: ???   (press "s" to show)', l:word)
+  endif
+  call add(l:lines, l:unit_line)
+
+  " Context: show only if it looks like a sentence (space or punctuation)
+  if type(l:ctx) != v:t_string
+    let l:ctx = ''
+  endif
+  if l:ctx !~# '\s' && l:ctx !~# '[\.\!\?,;:]'
+    let l:ctx = ''
   endif
 
+  let l:ctx1 = trim(substitute(substitute(l:ctx, '\n\+', ' ', 'g'), '\s\+', ' ', 'g'))
+  if !empty(l:ctx1)
+    call add(l:lines, printf('Context: %s', l:ctx1))
+  endif
+
+  " Spacer (two empty lines like in your mock)
   call add(l:lines, '')
-  call add(l:lines, printf('Count: %d   Hard: %d', l:count, l:hard))
+  call add(l:lines, '')
 
-  " Progress: how many words reached the given count
-  if l:total > 0 && l:thresh > 0
-    call add(l:lines,
-          \ printf('Progress: %d/%d words mastered (count ≥ %d) — %d%%',
-          \ l:mastered, l:total, l:thresh, l:percent))
+  " Stats in one line
+  if !empty(l:day)
+    call add(l:lines, printf(
+          \ 'Today: %d   Streak: %d days   Day: %s   Count: %d   Hard: %d',
+          \ l:today_done, l:streak_days, l:day, l:count, l:hard))
+  else
+    call add(l:lines, printf('Count: %d   Hard: %d', l:count, l:hard))
   endif
 
-  call add(l:lines, 'Keys: n - next word   s - show translation   x - mark "don''t know"   d - never show again   q - quit')
+  call add(l:lines, 'Keys: 0..5 grade  s show  n skip  x fail(0)  d ignore  q quit')
+  " call add(l:lines, 'Grades: 0 again • 1 hard • 2 ok • 3 good • 4 easy • 5 perfect')
 
+  " Write to the trainer buffer (do not switch windows/buffers)
+  call setbufvar(g:deepl_trainer_bufnr, '&modifiable', 1)
 
-  " Write to the buffer
-  let l:curbuf = bufnr('%')
-  if l:curbuf != g:deepl_trainer_bufnr
-    execute 'buffer' g:deepl_trainer_bufnr
+  " Replace content starting at line 1
+  call setbufline(g:deepl_trainer_bufnr, 1, l:lines)
+
+  " Remove old tail if new render is shorter
+  let l:new_len = len(l:lines)
+  let l:old_len = len(getbufline(g:deepl_trainer_bufnr, 1, '$'))
+  if l:old_len > l:new_len
+    call deletebufline(g:deepl_trainer_bufnr, l:new_len + 1, '$')
   endif
 
-  setlocal modifiable
-  call setline(1, l:lines)
-  if line('$') > len(l:lines)
-    execute (len(l:lines)+1) . ',$delete'
+  call s:deepl_trainer_apply_hl(g:deepl_trainer_bufnr, l:word, l:tr, a:show_translation)
+  call setbufvar(g:deepl_trainer_bufnr, '&modifiable', 0)
+
+endfunction
+
+" -------------------------------------------------------
+" Clear previous highlight matches in the trainer window (buffer-local target).
+function! s:deepl_trainer_hl_clear(bufnr) abort
+  let l:winid = bufwinid(a:bufnr)
+  if l:winid == -1
+    return
   endif
-  setlocal nomodifiable
+
+  let l:old = getwinvar(l:winid, 'deepl_trainer_match_ids', [])
+  for l:id in l:old
+    if type(l:id) == v:t_number && l:id > 0
+      " matchdelete must run in the same window where matchadd was done
+      try
+        call win_execute(l:winid, 'call matchdelete(' . l:id . ')')
+      catch
+      endtry
+    endif
+  endfor
+
+  call setwinvar(l:winid, 'deepl_trainer_match_ids', [])
+endfunction
+
+" -------------------------------------------------------
+" Ensure highlight groups exist (idempotent)
+function! s:deepl_trainer_ensure_hl() abort
+  if !hlexists('DeepLTrainerEmph')
+    " Bold + green (works in terminal and GUI)
+    highlight default DeepLTrainerEmph cterm=bold ctermfg=Green gui=bold guifg=Green
+  endif
+endfunction
+
+" Highlight only the value after a label on the same line:
+"   Unit: <word>   Translation: <tr>
+function! s:deepl_trainer_hl_value(bufnr, winid, label, value, group) abort
+  if empty(a:value)
+    return []
+  endif
+
+  let l:lines = getbufline(a:bufnr, 1, '$')
+  if empty(l:lines)
+    return []
+  endif
+
+  " Very nomagic, so we mostly match literal text
+  let l:label = escape(a:label, '\')
+  let l:val   = escape(a:value, '\')
+
+  " Find the first line that contains the label
+  let l:lnum = -1
+  for l:i in range(1, len(l:lines))
+    if l:lines[l:i - 1] =~# '\V' . l:label
+      let l:lnum = l:i
+      break
+    endif
+  endfor
+  if l:lnum == -1
+    return []
+  endif
+
+  " Match only the value (start at \zs), do NOT include the label
+  " Example: \%2l\VTranslation:\s\+\zsпредположить
+  let l:pat = '\%' . l:lnum . 'l\V' . l:label . '\s\+\zs' . l:val
+
+  let l:id = s:deepl_win_matchadd(a:winid, a:group, l:pat, 20)
+  return l:id > 0 ? [l:id] : []
+endfunction
+
+" Apply highlighting for the Unit word and Translation value on line 2
+function! s:deepl_trainer_apply_hl(bufnr, word, tr, show_translation) abort
+  let l:winid = bufwinid(a:bufnr)
+  if l:winid == -1
+    return
+  endif
+
+  " Ensure strings (avoid strlen() errors on v:null)
+  let l:word = type(a:word) == v:t_string ? a:word : string(a:word)
+  let l:tr   = type(a:tr)   == v:t_string ? a:tr   : string(a:tr)
+
+  call s:deepl_trainer_hl_clear(a:bufnr)
+
+  let l:lines = getbufline(a:bufnr, 1, '$')
+  if empty(l:lines)
+    return
+  endif
+
+  " Collect matchaddpos ids (stored per-window)
+  let l:ids = []
+
+  " Highlight only srs_hard (without brackets) inside [srs_hard]
+  let l:max = min([len(l:lines), 5])
+  for l:i in range(1, l:max)
+    let l:s = l:lines[l:i - 1]
+    let l:tag_full = '[srs_hard]'
+    let l:p = stridx(l:s, l:tag_full)
+    if l:p >= 0
+      let l:col = l:p + 2                 " 1-based col, points to 's' after '['
+      let l:len = strlen('srs_hard')
+      let l:id = s:deepl_win_matchaddpos(l:winid, 'DeepLTrainerModeHard', [[l:i, l:col, l:len]], 10)
+      if l:id > 0
+        call add(l:ids, l:id)
+      endif
+      break
+    endif
+  endfor
+
+  " Highlight Unit value only (after 'Unit: ')
+  call extend(l:ids, s:deepl_trainer_hl_value(a:bufnr, l:winid, 'Unit:', l:word, 'DeepLTrainerUnitWord'))
+
+  " Highlight Translation value only (after 'Translation: ')
+  if a:show_translation
+    call extend(l:ids, s:deepl_trainer_hl_value(a:bufnr, l:winid, 'Translation:', l:tr, 'DeepLTrainerTranslationWord'))
+  endif
+
+  " Highlight word inside Context line(s) (same color as Unit word, no bold)
+  if !empty(l:word)
+    call extend(l:ids, s:deepl_trainer_hl_in_context(a:bufnr, l:winid, l:word, 'DeepLTrainerContextWord'))
+  endif
+
+  " Drop failed match ids (0/negative)
+  let l:ids = filter(l:ids, 'type(v:val) == v:t_number && v:val > 0')
+  
+  " Save ids so we can clear them next render
+  call setwinvar(l:winid, 'deepl_trainer_match_ids', l:ids)
+endfunction
+" -------------------------------------------------------
+function! s:deepl_trainer_hl_in_context(bufnr, winid, word, group) abort
+  if empty(a:word)
+    return []
+  endif
+
+  let l:lines = getbufline(a:bufnr, 1, '$')
+  if len(l:lines) < 3
+    return []
+  endif
+
+  " Найдём строку, которая начинается с "Context:"
+  let l:ctx_lnum = -1
+  for l:i in range(1, len(l:lines))
+    if l:lines[l:i - 1] =~# '^Context:'
+      let l:ctx_lnum = l:i
+      break
+    endif
+  endfor
+  if l:ctx_lnum == -1
+    return []
+  endif
+
+  " Escape regex chars in word
+  let l:w = escape(a:word, '\.^$~[]*\/')
+  " Highlight only whole words on the context line (case-insensitive можно убрать \c)
+  let l:pat = '\%'.l:ctx_lnum.'l\<'.l:w.'\>'
+
+  let l:id = s:deepl_win_matchadd(a:winid, a:group, l:pat, 10)
+  return l:id > 0 ? [l:id] : []
+endfunction
+
+" Add a match inside a specific window and return its match id.
+function! s:deepl_win_matchadd(winid, group, pattern, priority) abort
+  if a:winid == -1
+    return 0
+  endif
+
+  " Store the id in a window variable to fetch it back reliably.
+  let l:cmd = printf(
+        \ "let w:deepl_trainer_tmp_mid = matchadd(%s, %s, %d)",
+        \ string(a:group),
+        \ string(a:pattern),
+        \ a:priority
+        \ )
+  call win_execute(a:winid, l:cmd)
+
+  let l:id = getwinvar(a:winid, 'deepl_trainer_tmp_mid', 0)
+  call win_execute(a:winid, 'unlet! w:deepl_trainer_tmp_mid')
+  return l:id
+endfunction
+
+" Add a matchaddpos inside a specific window and return its match id.
+function! s:deepl_win_matchaddpos(winid, group, poslist, priority) abort
+  if a:winid == -1
+    return 0
+  endif
+
+  let l:cmd = printf(
+        \ "let w:deepl_trainer_tmp_mid = matchaddpos(%s, %s, %d)",
+        \ string(a:group),
+        \ string(a:poslist),
+        \ a:priority
+        \ )
+  call win_execute(a:winid, l:cmd)
+
+  let l:id = getwinvar(a:winid, 'deepl_trainer_tmp_mid', 0)
+  call win_execute(a:winid, 'unlet! w:deepl_trainer_tmp_mid')
+  return l:id
 endfunction
 
 " -------------------------------------------------------
@@ -323,18 +554,28 @@ function! DeepLTrainerNext() abort
     return
   endif
 
-  " Take current source language from your toggle
+  " Determine source filter (EN/DA)
   if !exists('g:deepl_word_src_lang') || empty(g:deepl_word_src_lang)
     let l:src_filter = 'EN'
   else
-    let l:src_filter = g:deepl_word_src_lang      " EN or DA
+    let l:src_filter = g:deepl_word_src_lang
   endif
 
-  let g:deepl_pending_train = ''
+  " Exclude the currently shown card so 'n' never repeats it in this session
+  let l:cur_id = get(g:deepl_trainer_current, 'card_id', 0)
+  call s:deepl_exclude_add(l:cur_id)
+
+  if !exists('g:deepl_trainer_exclude') || type(g:deepl_trainer_exclude) != v:t_list
+    let g:deepl_trainer_exclude = []
+  endif
 
   if g:deepl_backend ==# 'http'
     " HTTP backend: /train/next
-    let l:payload = json_encode({'src_filter': l:src_filter})
+    let l:payload = json_encode({
+          \ 'src_filter': l:src_filter,
+          \ 'exclude_card_ids': g:deepl_trainer_exclude,
+          \ })
+
     let l:cmd = [
           \ 'curl', '-sS',
           \ '-X', 'POST',
@@ -351,6 +592,8 @@ function! DeepLTrainerNext() abort
           \ '--src', l:src_filter,
           \ ]
   endif
+
+  let g:deepl_trainer_last_op = 'next'
 
   call job_start(l:cmd, {
         \ 'out_cb': function('s:DeepLTrainOut'),
@@ -411,6 +654,47 @@ function! DeepLTrainerMarkHard() abort
   let l:hard = get(g:deepl_trainer_current, 'hard', 0) + 1
   let g:deepl_trainer_current.hard = l:hard
   call DeepLTrainerRender(1)
+endfunction
+
+" Add card_id to the exclude list (unique), keep last N items
+function! s:deepl_exclude_add(card_id) abort
+  if a:card_id <= 0
+    return
+  endif
+
+  if !exists('g:deepl_trainer_exclude') || type(g:deepl_trainer_exclude) != v:t_list
+    let g:deepl_trainer_exclude = []
+  endif
+
+  " Deduplicate
+  let l:i = index(g:deepl_trainer_exclude, a:card_id)
+  if l:i >= 0
+    call remove(g:deepl_trainer_exclude, l:i)
+  endif
+
+  call add(g:deepl_trainer_exclude, a:card_id)
+
+  " Cap list size (keep last 200)
+  let l:max = 200
+  if len(g:deepl_trainer_exclude) > l:max
+    call remove(g:deepl_trainer_exclude, 0, len(g:deepl_trainer_exclude) - l:max - 1)
+  endif
+endfunction
+
+function! DeepLTrainerSkip() abort
+  if empty(g:deepl_trainer_current)
+    return
+  endif
+
+  let l:cid = get(g:deepl_trainer_current, 'card_id', 0)
+  if l:cid > 0
+    " Add current card to exclude list for this session
+    if index(g:deepl_trainer_exclude, l:cid) < 0
+      call add(g:deepl_trainer_exclude, l:cid)
+    endif
+  endif
+
+  call DeepLTrainerNext()
 endfunction
 
 function! DeepLTrainerIgnore() abort
@@ -493,6 +777,10 @@ function! DeepLTrainerReview(grade) abort
 
   if g:deepl_backend ==# 'http'
     " HTTP backend: /train/review
+    
+    " Exclude the just-reviewed card from further :train/next picks in this session
+    call s:deepl_exclude_add(l:card_id)
+
     let l:payload = json_encode({'src_filter': l:src_filter, 'card_id': l:card_id, 'grade': a:grade})
     let l:cmd = [
           \ 'curl', '-sS',
@@ -512,6 +800,13 @@ function! DeepLTrainerReview(grade) abort
           \ '--grade', string(a:grade),
           \ ]
   endif
+
+  let g:deepl_trainer_last_op = 'review'
+  let g:deepl_trainer_last_reviewed_id = get(g:deepl_trainer_current, 'card_id', 0)
+ 
+  let g:deepl_trainer_last_card = l:card_id
+  call s:deepl_exclude_add(l:card_id)
+
 
   call job_start(l:cmd, {
         \ 'out_cb': function('s:DeepLTrainOut'),
@@ -533,6 +828,12 @@ endfunction
 
 function! deepl#trainer_start() abort
   " Trainer also does not need API key when using HTTP backend.
+  " Reset session skip list
+  let g:deepl_trainer_exclude = []
+
+  " Reset per-session exclude list
+  let g:deepl_trainer_exclude = []
+
   if g:deepl_backend !=# 'http' && empty(g:deepl_api_key)
     echo "Error: DEEPL_API_KEY is not set"
     return
@@ -561,7 +862,7 @@ function! deepl#trainer_start() abort
 
   " Local key mappings in trainer buffer
   nnoremap <silent> <buffer> q :bd!<CR>
-  nnoremap <silent> <buffer> n :call DeepLTrainerNext()<CR>
+  nnoremap <silent> <buffer> n :call DeepLTrainerSkip()<CR>
   nnoremap <silent> <buffer> s :call DeepLTrainerShow()<CR>
   nnoremap <silent> <buffer> x :call DeepLTrainerMarkHard()<CR>
   nnoremap <silent> <buffer> d :call DeepLTrainerIgnore()<CR>
@@ -903,6 +1204,23 @@ function! s:deepl_defs_popup_apply_hl(popup_id) abort
   call win_execute(l:winid,
         \ "silent! call matchadd('DeeplPopupCtx', '\\<CTX\\>', 30)")
 endfunction
+" -------------------------------------------------------
+" Trainer highlight groups
+if !exists('g:deepl_trainer_hl_defined')
+  let g:deepl_trainer_hl_defined = 1
+
+  " Unit word (value only)
+  highlight default DeepLTrainerUnitWord cterm=bold ctermfg=121 gui=bold
+
+  " Translation value only
+  highlight default DeepLTrainerTranslationWord cterm=bold ctermfg=221 gui=bold
+
+  " Mode tag, e.g. [srs_hard]
+  highlight default DeepLTrainerModeHard cterm=bold ctermfg=94 gui=bold
+
+  highlight default DeepLTrainerContextWord ctermfg=121 gui=NONE cterm=NONE
+
+endif
 " -------------------------------------------------------
 function! s:popup_scroll(id, delta) abort
   " Vim without these functions can't scroll popups
@@ -1255,7 +1573,7 @@ function! DeepLShowInWindow() abort
   let l:bufnr   = bufnr(l:bufname)
 
   " --- Open or reuse bottom window with height 5 lines ---
-  let l:win_height = 8 
+  let l:win_height = 5 
 
   if l:bufnr == -1
     " Buffer does not exist yet — create new split at the bottom
@@ -1364,7 +1682,7 @@ endfunction
 " Popup highlight groups (MW/word popup header tags)
 highlight default DeeplPopupSrcDict cterm=bold ctermfg=108 gui=bold
 highlight default DeeplPopupSrcApi  cterm=bold ctermfg=110 gui=bold
-highlight default DeeplPopupCtx     cterm=bold ctermfg=215 gui=bold
-highlight default DeeplPopupHeaderLeft cterm=bold gui=bold
+highlight default DeeplPopupCtx     cterm=bold ctermfg=179 gui=bold
+highlight default DeeplPopupHeaderLeft cterm=bold ctermfg=220 gui=bold
 
 "===========================================================
