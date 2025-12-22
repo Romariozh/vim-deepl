@@ -64,3 +64,13 @@ nnoremap <silent> <leader>d :call deepl#show_defs()<CR>
 
 " Trainer command
 command! DeepLTrainerStart call deepl#trainer_start()
+
+" Study UI commands
+command! DeepLStudyStart  silent! call deepl#ui#ensure() | silent! call deepl#trainer_start()
+command! DeepLStudyClose  call deepl#ui#close()
+
+augroup deepl_hl
+  autocmd!
+  autocmd VimEnter,ColorScheme * call deepl#hl#apply_trainer()
+augroup END
+

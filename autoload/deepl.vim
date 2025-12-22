@@ -251,10 +251,8 @@ function! s:DeepLTrainExit(channel, status) abort
 
   call DeepLTrainerRender(0)
 endfunction
-
 " -------------------------------------------------------
 " Render the contents of the trainer buffer
-
 function! DeepLTrainerRender(show_translation) abort
   if g:deepl_trainer_bufnr <= 0 || !bufexists(g:deepl_trainer_bufnr)
     return
@@ -285,25 +283,25 @@ function! DeepLTrainerRender(show_translation) abort
   let l:thresh   = get(l:stats, 'mastery_threshold', 0)
   let l:percent  = get(l:stats, 'mastery_percent', 0)
 
+  " Resolve filter / src labels
   let l:filter = exists('g:deepl_word_src_lang') ? g:deepl_word_src_lang : l:src
-  let l:mode_suffix = empty(l:mode) ? '' : (' [' . l:mode . ']')
-  let l:lines = []
-  " Fallbacks for empty language tags (avoid blank header)
   let l:filter = empty(l:filter) ? 'EN' : l:filter
   let l:src = empty(l:src) ? l:filter : l:src
+  let l:mode_suffix = empty(l:mode) ? '' : (' [' . l:mode . ']')
 
-  call add(l:lines, printf('DeepL Trainer (%s → %s) — unit from %s%s',
-        \ l:filter, l:lang, l:src, l:mode_suffix))
+  " Determine width (prefer actual window width if visible)
+  let l:winid = bufwinid(g:deepl_trainer_bufnr)
+  let l:width = (l:winid != -1) ? winwidth(l:winid) : &columns
+  let l:width = max([40, l:width - 1])
+  let l:sep = repeat('-', l:width)
 
-  " Unit + Translation on the same line
-  if a:show_translation
-    let l:unit_line = printf('Unit: %s   Translation: %s', l:word, l:tr)
-  else
-    let l:unit_line = printf('Unit: %s   Translation: ???   (press "s" to show)', l:word)
-  endif
-  call add(l:lines, l:unit_line)
+  " Progress bar (ASCII-safe)
+  let l:bar_w = max([10, min([24, l:width - 26])])
+  let l:fill = float2nr(l:bar_w * (l:percent / 100.0))
+  let l:fill = max([0, min([l:bar_w, l:fill])])
+  let l:bar = '[' . repeat('#', l:fill) . repeat('-', l:bar_w - l:fill) . ']'
 
-  " Context: show only if it looks like a sentence (space or punctuation)
+  " Context: show only if it looks like a sentence
   if type(l:ctx) != v:t_string
     let l:ctx = ''
   endif
@@ -311,45 +309,114 @@ function! DeepLTrainerRender(show_translation) abort
     let l:ctx = ''
   endif
 
-  let l:ctx1 = trim(substitute(substitute(l:ctx, '\n\+', ' ', 'g'), '\s\+', ' ', 'g'))
-  if !empty(l:ctx1)
-    call add(l:lines, printf('Context: %s', l:ctx1))
-  endif
+  let l:lines = []
 
-  " Spacer (two empty lines like in your mock)
-  call add(l:lines, '')
-  call add(l:lines, '')
-
-  " Stats in one line
+  " Header
   if !empty(l:day)
-    call add(l:lines, printf(
-          \ 'Today: %d   Streak: %d days   Day: %s   Count: %d   Hard: %d',
-          \ l:today_done, l:streak_days, l:day, l:count, l:hard))
+    call add(l:lines, printf('DeepL Trainer (%s -> %s)%s  Today:%d  Streak:%dd  Count:%d  Hard:%d',
+          \ l:filter, l:lang, l:mode_suffix, l:today_done, l:streak_days, l:count, l:hard))
   else
-    call add(l:lines, printf('Count: %d   Hard: %d', l:count, l:hard))
+    call add(l:lines, printf('DeepL Trainer (%s -> %s)%s  Count:%d  Hard:%d',
+          \ l:filter, l:lang, l:mode_suffix, l:count, l:hard))
+  endif
+  call add(l:lines, l:sep)
+
+  " Card
+  call add(l:lines, 'UNIT: ' . l:word)
+
+  if a:show_translation
+    call add(l:lines, 'TRN:  ' . l:tr)
+  else
+    call add(l:lines, 'TRN:  ???   (press "s" to show)')
   endif
 
-  call add(l:lines, 'Keys: 0..5 grade  s show  n skip  x fail(0)  d ignore  q quit')
-  " call add(l:lines, 'Grades: 0 again • 1 hard • 2 ok • 3 good • 4 easy • 5 perfect')
+  " Context (up to 2 lines)
+  let l:ctx_lines = s:deepl_wrap(l:ctx, l:width - 6, 2)
+  if !empty(l:ctx_lines)
+    call add(l:lines, 'CTX:  ' . l:ctx_lines[0])
+    if len(l:ctx_lines) > 1
+      call add(l:lines, '      ' . l:ctx_lines[1])
+    endif
+  endif
 
-  " Write to the trainer buffer (do not switch windows/buffers)
+  call add(l:lines, '')
+
+  " Stats line (mastery)
+  call add(l:lines, printf('Mastery: %s %d%%   %d/%d   thresh:%d',
+        \ l:bar, l:percent, l:mastered, l:total, l:thresh))
+
+  call add(l:lines, l:sep)
+
+  " Footer (keys must match mappings)
+  call add(l:lines, 'Keys: 0..5 grade   s show   n skip   x hard   d ignore   q close   a again(0)')
+
+  " Write to trainer buffer without switching windows
   call setbufvar(g:deepl_trainer_bufnr, '&modifiable', 1)
 
-  " Replace content starting at line 1
   call setbufline(g:deepl_trainer_bufnr, 1, l:lines)
 
-  " Remove old tail if new render is shorter
   let l:new_len = len(l:lines)
   let l:old_len = len(getbufline(g:deepl_trainer_bufnr, 1, '$'))
   if l:old_len > l:new_len
     call deletebufline(g:deepl_trainer_bufnr, l:new_len + 1, '$')
   endif
 
-  call s:deepl_trainer_apply_hl(g:deepl_trainer_bufnr, l:word, l:tr, a:show_translation)
+  let l:winid = bufwinid(g:deepl_trainer_bufnr)
+  if l:winid != -1
+    call win_execute(
+          \ l:winid,
+          \ 'call deepl#trainer_apply_hl('
+          \ . g:deepl_trainer_bufnr . ', '
+          \ . string(l:word) . ', '
+          \ . string(l:tr) . ', '
+          \ . a:show_translation . ')'
+          \ )
+  endif
+
   call setbufvar(g:deepl_trainer_bufnr, '&modifiable', 0)
-
 endfunction
+" -------------------------------------------------------
+" Normalize whitespace to one-line string
+function! s:deepl_one_line(text) abort
+  if type(a:text) != v:t_string
+    return ''
+  endif
+  let l:s = substitute(a:text, '\n\+', ' ', 'g')
+  let l:s = substitute(l:s, '\s\+', ' ', 'g')
+  return trim(l:s)
+endfunction
+" -------------------------------------------------------
+" Simple word wrap: returns up to a:max_lines lines, each within a:width
+function! s:deepl_wrap(text, width, max_lines) abort
+  let l:t = s:deepl_one_line(a:text)
+  if empty(l:t) || a:width <= 5
+    return []
+  endif
 
+  let l:words = split(l:t, ' ')
+  let l:out = []
+  let l:cur = ''
+
+  for l:w in l:words
+    if empty(l:cur)
+      let l:cur = l:w
+    elseif strdisplaywidth(l:cur . ' ' . l:w) <= a:width
+      let l:cur .= ' ' . l:w
+    else
+      call add(l:out, l:cur)
+      if len(l:out) >= a:max_lines
+        return l:out
+      endif
+      let l:cur = l:w
+    endif
+  endfor
+
+  if !empty(l:cur) && len(l:out) < a:max_lines
+    call add(l:out, l:cur)
+  endif
+
+  return l:out
+endfunction
 " -------------------------------------------------------
 " Clear previous highlight matches in the trainer window (buffer-local target).
 function! s:deepl_trainer_hl_clear(bufnr) abort
@@ -473,6 +540,139 @@ function! s:deepl_trainer_apply_hl(bufnr, word, tr, show_translation) abort
   
   " Save ids so we can clear them next render
   call setwinvar(l:winid, 'deepl_trainer_match_ids', l:ids)
+endfunction
+" -------------------------------------------------------
+function! deepl#trainer_apply_hl(bufnr, word, tr, show) abort
+  " Must run in trainer window context (call via win_execute()).
+  if a:bufnr <= 0
+    return
+  endif
+
+  " Ensure highlight groups exist (colorscheme may reset them)
+  if !hlexists('DeepLTrainerUnitWord')
+    highlight default DeepLTrainerUnitWord cterm=bold ctermfg=121 gui=bold
+  endif
+  if !hlexists('DeepLTrainerTranslationWord')
+    highlight default DeepLTrainerTranslationWord cterm=bold ctermfg=221 gui=bold
+  endif
+  if !hlexists('DeepLTrainerModeHard')
+    highlight default DeepLTrainerModeHard cterm=bold ctermfg=94 gui=bold
+  endif
+  if !hlexists('DeepLTrainerContextWord')
+    highlight default DeepLTrainerContextWord ctermfg=121 gui=NONE cterm=NONE
+  endif
+
+  if bufnr('%') != a:bufnr
+    execute 'silent! buffer ' . a:bufnr
+  endif
+
+  " Clear previous window-local matches
+  if exists('w:deepl_trainer_match_ids')
+    for l:id in w:deepl_trainer_match_ids
+      silent! call matchdelete(l:id)
+    endfor
+  endif
+  let w:deepl_trainer_match_ids = []
+
+  " Highlight UNIT value
+  let l:ln = search('^UNIT:\s*', 'nW')
+  if l:ln > 0 && !empty(a:word)
+    let l:line = getline(l:ln)
+    let l:col0 = matchend(l:line, '^UNIT:\s*') + 1
+    if l:col0 > 0
+      call add(w:deepl_trainer_match_ids,
+            \ matchaddpos('DeepLTrainerUnitWord', [[l:ln, l:col0, strlen(a:word)]]))
+    endif
+  endif
+
+  " Highlight TRN value (only when shown)
+  if a:show
+    let l:ln = search('^TRN:\s*', 'nW')
+    if l:ln > 0 && !empty(a:tr)
+      let l:line = getline(l:ln)
+      let l:col0 = matchend(l:line, '^TRN:\s*') + 1
+      if l:col0 > 0
+        call add(w:deepl_trainer_match_ids,
+              \ matchaddpos('DeepLTrainerTranslationWord', [[l:ln, l:col0, strlen(a:tr)]]))
+      endif
+    endif
+  endif
+
+  " Highlight word occurrences in CTX lines (word only)
+  if !empty(a:word)
+    let l:positions = []
+    let l:needle = '\<' . escape(a:word, '\.^$~[]') . '\>'
+
+    " Find CTX line, then also process continuation lines (6 leading spaces)
+    let l:ln = search('^CTX:\s*', 'nW')
+    while l:ln > 0
+      let l:line = getline(l:ln)
+
+      if l:line =~# '^CTX:\s*' || l:line =~# '^\s\{6}'
+        let l:start = 0
+        while 1
+          let l:m = matchstrpos(l:line, l:needle, l:start)
+          if empty(l:m) || l:m[1] < 0
+            break
+          endif
+          call add(l:positions, [l:ln, l:m[1] + 1, strlen(l:m[0])])
+          let l:start = l:m[2]
+        endwhile
+        let l:ln += 1
+        continue
+      endif
+
+      break
+    endwhile
+
+    if !empty(l:positions)
+      call add(w:deepl_trainer_match_ids, matchaddpos('DeepLTrainerContextWord', l:positions))
+    endif
+  endif
+
+  " Highlight Hard:1 in header if present
+  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerModeHard', 'Hard:\s*1'))
+endfunction
+" -------------------------------------------------------
+function! deepl#translation_apply_hl(bufnr) abort
+  " Must run in translation window context (call via win_execute()).
+  if a:bufnr <= 0
+    return
+  endif
+  if bufnr('%') != a:bufnr
+    execute 'silent! buffer ' . a:bufnr
+  endif
+
+  " Ensure highlight groups exist (colorscheme may reset links)
+  if !hlexists('DeepLTransHeader')
+    highlight link DeepLTransHeader Identifier
+  else
+    highlight link DeepLTransHeader Identifier
+  endif
+  if !hlexists('DeepLTransSRC')
+    highlight link DeepLTransSRC Comment
+  else
+    highlight link DeepLTransSRC Comment
+  endif
+  if !hlexists('DeepLTransTRN')
+    highlight link DeepLTransTRN String
+  else
+    highlight link DeepLTransTRN String
+  endif
+
+  " Clear old window-local matches
+  if exists('w:deepl_trans_match_ids')
+    for l:id in w:deepl_trans_match_ids
+      silent! call matchdelete(l:id)
+    endfor
+  endif
+  let w:deepl_trans_match_ids = []
+
+  " Header like: #2 [EN -> RU]
+  call add(w:deepl_trans_match_ids, matchadd('DeepLTransHeader', '^#\d\+.*$'))
+  " SRC/TRN lines
+  call add(w:deepl_trans_match_ids, matchadd('DeepLTransSRC', '^SRC:.*$'))
+  call add(w:deepl_trans_match_ids, matchadd('DeepLTransTRN', '^TRN:.*$'))
 endfunction
 " -------------------------------------------------------
 function! s:deepl_trainer_hl_in_context(bufnr, winid, word, group) abort
@@ -827,10 +1027,6 @@ function! DeepLTrainerShow() abort
 endfunction
 
 function! deepl#trainer_start() abort
-  " Trainer also does not need API key when using HTTP backend.
-  " Reset session skip list
-  let g:deepl_trainer_exclude = []
-
   " Reset per-session exclude list
   let g:deepl_trainer_exclude = []
 
@@ -849,19 +1045,62 @@ function! deepl#trainer_start() abort
     return
   endif
 
-  " Open trainer window at the bottom with fixed height 8
-  botright 8split __DeepL_Trainer__
-  let g:deepl_trainer_bufnr = bufnr('%')
+  let l:bufname = '__DeepL_Trainer__'
+  let l:bn = bufnr(l:bufname)
 
+  " Prefer Study UI trainer window if available
+  if exists('*deepl#ui#ensure') && exists('*deepl#ui#trainer_winid')
+    call deepl#ui#ensure()
+    let l:tw = deepl#ui#trainer_winid()
+
+    if l:tw
+      call win_gotoid(l:tw)
+
+      if l:bn != -1
+        execute 'silent! buffer ' . l:bn
+      else
+        enew
+        execute 'silent! file ' . l:bufname
+      endif
+
+      let g:deepl_trainer_bufnr = bufnr('%')
+    else
+      " Fallback to legacy split if UI exists but trainer window is not found
+      let l:tw = 0
+    endif
+  else
+    let l:tw = 0
+  endif
+
+  " Legacy mode: open trainer window at the bottom with fixed height 8
+  if !l:tw
+    if l:bn != -1
+      let l:wnr = bufwinnr(l:bn)
+      if l:wnr != -1
+        execute l:wnr . 'wincmd w'
+      else
+        botright 8split
+        execute 'buffer ' . l:bn
+      endif
+    else
+      botright 8split __DeepL_Trainer__
+    endif
+    let g:deepl_trainer_bufnr = bufnr('%')
+    setlocal winfixheight
+  endif
+
+  " Common buffer/window options
   setlocal buftype=nofile bufhidden=wipe noswapfile nobuflisted
   setlocal wrap linebreak
   setlocal nonumber norelativenumber
-  setlocal winfixheight          " <=== fix height at 8 lines
+
+  " In UI mode we do not force height here; UI reflow controls it
+  " In legacy mode winfixheight is set above
 
   setlocal modifiable
 
   " Local key mappings in trainer buffer
-  nnoremap <silent> <buffer> q :bd!<CR>
+  nnoremap <silent> <buffer> q :DeepLStudyClose<CR>
   nnoremap <silent> <buffer> n :call DeepLTrainerSkip()<CR>
   nnoremap <silent> <buffer> s :call DeepLTrainerShow()<CR>
   nnoremap <silent> <buffer> x :call DeepLTrainerMarkHard()<CR>
@@ -876,8 +1115,7 @@ function! deepl#trainer_start() abort
   nnoremap <silent> <buffer> 5 :call DeepLTrainerReview(5)<CR>
 
   " Quick 'again' (alias for grade 0)
-  nnoremap <silent> <buffer> x :call DeepLTrainerReview(0)<CR>
-
+  nnoremap <silent> <buffer> a :call DeepLTrainerReview(0)<CR>
 
   setlocal nomodifiable
 
@@ -1468,12 +1706,20 @@ function! s:DeepLSelExit(channel, status) abort
   endif
 
   " -------------------------------
-  " BRANCH 2: 4+ words -> history window (as before)
+  " BRANCH 2: 4+ words -> UI window if available, fallback to history window
   " -------------------------------
+  if exists('*deepl#ui#ensure')
+    call deepl#ui#ensure()
+  endif
+
+  " Use history appending logic to avoid wiping previous entries
   call DeepLShowInWindow()
+
 endfunction
 
 function! deepl#translate_from_visual() abort
+  call deepl#ui#ensure()
+
   " Basic checks
   if g:deepl_backend !=# 'http' && empty(g:deepl_api_key)
     echo "Error: DEEPL_API_KEY is not set"
@@ -1545,6 +1791,9 @@ function! deepl#translate_from_visual() abort
         \ l:src_hint,
         \ ]
     endif
+    
+    let g:deepl_last_sel_src = l:text
+    let g:deepl_pending_sel = ''
 
     call job_start(l:cmd, {
        \ 'out_cb': function('s:DeepLSelOut'),
@@ -1565,69 +1814,131 @@ function! DeepLShowInWindow() abort
     return
   endif
 
-  " Remember current window (main text) to restore focus later
+  " UI-first path: reuse the right panel translation window if available
+  if exists('*deepl#ui#ensure')
+    let l:bufname = '__DeepL_Translation__'
+    let l:bufnr_ui = bufnr(l:bufname)
+
+    " Try to find an existing window showing the translation buffer
+    let l:wnr_ui = (l:bufnr_ui == -1) ? -1 : bufwinnr(l:bufnr_ui)
+
+    " If not visible, open the study UI once and try again
+    if l:wnr_ui == -1
+      call deepl#ui#ensure()
+      let l:bufnr_ui = bufnr(l:bufname)
+      let l:wnr_ui = (l:bufnr_ui == -1) ? -1 : bufwinnr(l:bufnr_ui)
+    endif
+
+    " If still not visible, fall back to legacy behavior
+    if l:wnr_ui != -1
+      let l:curid = win_getid()
+      execute l:wnr_ui . 'wincmd w'
+
+      " Trim trailing newlines to avoid empty lines at the end
+      let l:entry = substitute(g:deepl_last_entry, '\n\+$', '', '')
+      let l:lines = split(l:entry, "\n")
+
+      setlocal buftype=nofile bufhidden=hide nobuflisted noswapfile
+      setlocal wrap linebreak
+      setlocal nonumber norelativenumber
+
+      " Buffer-local mapping:
+      " q - clear history/output but keep the UI layout
+      nnoremap <silent> <buffer> q :call DeepLClearHistory()<CR>
+
+      setlocal modifiable
+
+      " Add a separator only when needed (avoid double blank lines)
+      if !(line('$') == 1 && getline(1) ==# '')
+        if getline(line('$')) !=# ''
+          call append(line('$'), '')
+        endif
+      endif
+
+      if line('$') == 1 && getline(1) ==# ''
+        call setline(1, l:lines)
+      else
+        call append(line('$'), l:lines)
+      endif
+
+      setlocal nomodifiable
+
+      " Keep cursor at the very bottom (latest line) and show the bottom of the buffer
+      normal! G
+      normal! zb
+
+      call win_gotoid(l:curid)
+      silent! echo ""
+      silent! redraw!
+      return
+    endif
+  endif
+
+  " Fallback path: legacy bottom split behavior (unchanged layout logic)
   let l:curwin  = winnr()
 
   let l:lines   = split(g:deepl_last_entry, "\n")
   let l:bufname = "__DeepL_Translation__"
   let l:bufnr   = bufnr(l:bufname)
 
-  " --- Open or reuse bottom window with height 5 lines ---
-  let l:win_height = 5 
+  let l:win_height = 5
 
   if l:bufnr == -1
-    " Buffer does not exist yet — create new split at the bottom
     execute 'botright ' . l:win_height . 'new'
     let l:bufnr = bufnr('%')
-    execute 'file ' . l:bufname
+    silent! execute 'file ' . l:bufname
   else
-    " Buffer already exists
     let l:wnr = bufwinnr(l:bufnr)
     if l:wnr == -1
-      " Buffer exists but is not shown — open in a new bottom split
       execute 'botright ' . l:win_height . 'split'
-      execute 'buffer ' . l:bufnr
+      silent! execute 'buffer ' . l:bufnr
     else
-      " Buffer is already visible — just jump to its window
       execute l:wnr . 'wincmd w'
       execute 'resize ' . l:win_height
     endif
   endif
 
-  " Local options for history window
   setlocal buftype=nofile bufhidden=hide nobuflisted noswapfile
   setlocal wrap linebreak
   setlocal nonumber norelativenumber
-  setlocal winfixheight          " keep height fixed at 5 lines
+  setlocal winfixheight
 
-  " Buffer-local mapping:
-  " q - clear history and close window
   nnoremap <silent> <buffer> q :call DeepLClearHistory()<CR>
 
-  " Make buffer editable
   setlocal modifiable
 
-  " If buffer is empty — write from the beginning,
-  " otherwise append at the end with an empty separator line
+  " Add a separator only when needed (avoid double blank lines)
+  if !(line('$') == 1 && getline(1) ==# '')
+    if getline(line('$')) !=# ''
+      call append(line('$'), '')
+    endif
+  endif
+
   if line('$') == 1 && getline(1) ==# ''
     call setline(1, l:lines)
   else
-    call append(line('$'), '')
     call append(line('$'), l:lines)
   endif
 
-  " Make non-modifiable to avoid accidental edits
   setlocal nomodifiable
 
-  " Scroll to bottom, then move cursor to the header line of the last entry ("#N [...] [...]").
-  " Go to end (latest entry at bottom)
-  normal! G
-  " Decide whether to show header (top) or end (bottom)
+  " Re-apply translation highlights in this window
+  let l:bn = bufnr('%')
+  call win_execute(l:winid, 'call deepl#translation_apply_hl(' . l:bn . ')')
+
+" setlocal modifiable
+ " if line('$') == 1 && getline(1) ==# ''
+ "   call setline(1, l:lines)
+ " else
+ "   call append(line('$'), '')
+ "   call append(line('$'), l:lines)
+ " endif
+ " setlocal nomodifiable
+
   normal! G
   let l:header_lnum = search('^#\d\+ ', 'bW')
   if l:header_lnum > 0
     let l:entry_len = line('$') - l:header_lnum + 1
-    " Если запись больше высоты окна - 1, показываем низ
     if l:entry_len > (winheight(0) - 1)
       normal! zb
     else
@@ -1638,45 +1949,60 @@ function! DeepLShowInWindow() abort
     normal! zb
   endif
 
-  " Restore focus to the original window (main text)
   if l:curwin > 0 && winnr() != l:curwin
     execute l:curwin . 'wincmd w'
   endif
-  " Clear command line & redraw to remove status junk
+
   silent! echo ""
   silent! redraw!
 endfunction
 
 function! DeepLClearHistory() abort
-  let l:bufname = "__DeepL_Translation__"
+  let l:bufname = '__DeepL_Translation__'
   let l:bufnr   = bufnr(l:bufname)
 
-  " Сбрасываем счётчики истории
+  " Reset history counters/state
   let g:deepl_request_counter = 0
-  unlet! g:deepl_last_entry
+  let g:deepl_last_entry = ''
 
-  " Если буфера нет — просто сообщение
+  " UI mode: keep the right panel window/buffer, just clear content
+  if exists('*deepl#ui#translation_winid') && exists('*deepl#ui#ensure')
+    call deepl#ui#ensure()
+    let l:winid = deepl#ui#translation_winid()
+    if l:winid
+      let l:curid = win_getid()
+      call win_gotoid(l:winid)
+
+      setlocal modifiable
+      silent! %delete _
+      setlocal nomodifiable
+
+      call win_gotoid(l:curid)
+      echo 'DeepL history cleared'
+      return
+    endif
+  endif
+
+  " Legacy mode: if no buffer exists, nothing else to do
   if l:bufnr == -1
-    echo "DeepL history cleared"
+    echo 'DeepL history cleared'
     return
   endif
 
-  " Буфер есть, проверим его окно
+  " If buffer is visible, close it (legacy bottom split behavior)
   let l:wnr = bufwinnr(l:bufnr)
-
-  " Если окно открыто — закрываем его напрямую
   if l:wnr != -1
     execute l:wnr . 'wincmd w'
-    bd!
-    echo "DeepL history cleared"
+    execute 'bwipeout!'
+    echo 'DeepL history cleared'
     return
   endif
 
-  " Окно закрыто, но буфер существует — очищаем контент
+  " Buffer exists but is hidden: clear its content
   call setbufline(l:bufnr, 1, [''])
   call deletebufline(l:bufnr, 2, '$')
 
-  echo "DeepL history cleared"
+  echo 'DeepL history cleared'
 endfunction
 
 " Popup highlight groups (MW/word popup header tags)
