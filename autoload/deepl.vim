@@ -287,7 +287,16 @@ function! DeepLTrainerRender(show_translation) abort
   let l:filter = exists('g:deepl_word_src_lang') ? g:deepl_word_src_lang : l:src
   let l:filter = empty(l:filter) ? 'EN' : l:filter
   let l:src = empty(l:src) ? l:filter : l:src
-  let l:mode_suffix = empty(l:mode) ? '' : (' [' . l:mode . ']')
+  
+  " Pretty label for header modes (API sends raw mode strings)
+  let l:mode_label = l:mode
+  if l:mode_label ==# 'fallback'
+    let l:mode_label = 'all done'
+  endif
+
+  let l:mode_suffix = empty(l:mode_label) ? '' : (' [' . l:mode_label . ']')
+
+  "let l:mode_suffix = empty(l:mode) ? '' : (' [' . l:mode . ']')
   
   " Determine width (prefer actual window width if visible)
   let l:winid = bufwinid(g:deepl_trainer_bufnr)
@@ -313,7 +322,7 @@ function! DeepLTrainerRender(show_translation) abort
 
   " Header (no legacy Count/Hard)
   call add(l:lines, printf(
-        \ 'DL Trainer (%s -> %s)%s Reviewed: %d Run: %dd',
+        \ ' :Trainer: (%s -> %s)%s Reviewed: %d Run: %dd',
         \ l:filter, l:lang, l:mode_suffix, l:today_done, l:streak_days))
   
   " SRS details line (replaces old Count/Hard line)
@@ -340,18 +349,17 @@ function! DeepLTrainerRender(show_translation) abort
   if a:show_translation
     call add(l:lines, 'UNIT: ' . l:word . '    TRN:  ' . l:tr)
   else
-    call add(l:lines, 'UNIT: ' . l:word . '    TRN:  ???   (press "s" to show)')
+    call add(l:lines, 'UNIT: ' . l:word . '    TRN: [hidden] (s)')
   endif
 
   " Context (up to 2 lines)
   let l:ctx_lines = s:deepl_wrap(l:ctx, l:width - 6, 3)
   if !empty(l:ctx_lines)
-    call add(l:lines, 'CTX:  ' . l:ctx_lines[0])
-    if len(l:ctx_lines) > 1
-      call add(l:lines, '      ' . l:ctx_lines[1])
-    endif
+   call add(l:lines, 'CTX:  ' . l:ctx_lines[0])
+   if len(l:ctx_lines) > 1 | call add(l:lines, '      ' . l:ctx_lines[1]) | endif
+   if len(l:ctx_lines) > 2 | call add(l:lines, '      ' . l:ctx_lines[2]) | endif
   endif
-  
+ 
   " --- GRAMMAR (MW) ---
   let l:g = get(l:res, 'grammar', {})
   if type(l:g) == v:t_dict && !empty(l:g)
