@@ -304,3 +304,17 @@ function! deepl#ui#reflow() abort
   call win_gotoid(l:curid)
 endfunction
 
+function! deepl#ui#is_open() abort
+  " UI is considered open if any of the tool buffers is visible
+  return bufwinnr('__DeepL_Trainer__') != -1 || bufwinnr('__DeepL_Translation__') != -1
+endfunction
+
+function! deepl#ui#toggle() abort
+  if deepl#ui#is_open()
+    silent! call deepl#ui#close()
+  else
+    silent! call deepl#ui#ensure()
+    silent! call deepl#trainer_start()
+  endif
+endfunction
+

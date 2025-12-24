@@ -62,12 +62,28 @@ nnoremap <silent> <S-F3>  :call deepl#cycle_target_lang()<CR>
 " Show MW definitions for the word under the cursor
 nnoremap <silent> <leader>d :call deepl#show_defs()<CR>
 
+nnoremap <silent> <leader>s :DeepLStudyToggle<CR>
+
+
 " Trainer command
 command! DeepLTrainerStart call deepl#trainer_start()
 
 " Study UI commands
-command! DeepLStudyStart  silent! call deepl#ui#ensure() | silent! call deepl#trainer_start()
+"command! DeepLStudyStart  silent! call deepl#ui#ensure() | silent! call deepl#trainer_start()
+command! DeepLStudyStart  call deepl#ui#ensure() | call deepl#trainer_start()
+
 command! DeepLStudyClose  call deepl#ui#close()
+" Toggle Study UI (start if closed, close if open)
+command! DeepLStudyToggle call deepl#ui#toggle()
+" Ignore current trainer entry (explicit command, no keymap)
+command! DeepLEntryIgnore call DeepLTrainerIgnore() 
+
+"Aliases
+command! DLStudyStart  DeepLStudyStart
+command! DLStudyClose  DeepLStudyClose
+command! DLStudyToggle DeepLStudyToggle
+command! DLIgnore      DeepLEntryIgnore
+
 
 augroup deepl_hl
   autocmd!

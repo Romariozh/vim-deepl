@@ -288,7 +288,7 @@ function! DeepLTrainerRender(show_translation) abort
   let l:filter = empty(l:filter) ? 'EN' : l:filter
   let l:src = empty(l:src) ? l:filter : l:src
   let l:mode_suffix = empty(l:mode) ? '' : (' [' . l:mode . ']')
-
+  
   " Determine width (prefer actual window width if visible)
   let l:winid = bufwinid(g:deepl_trainer_bufnr)
   let l:width = (l:winid != -1) ? winwidth(l:winid) : &columns
@@ -311,23 +311,36 @@ function! DeepLTrainerRender(show_translation) abort
 
   let l:lines = []
 
-  " Header
-  if !empty(l:day)
-    call add(l:lines, printf('DeepL Trainer (%s -> %s)%s  Today:%d  Streak:%dd  Count:%d  Hard:%d',
-          \ l:filter, l:lang, l:mode_suffix, l:today_done, l:streak_days, l:count, l:hard))
+  " Header (no legacy Count/Hard)
+  call add(l:lines, printf(
+        \ 'DL Trainer (%s -> %s)%s Reviewed: %d Run: %dd',
+        \ l:filter, l:lang, l:mode_suffix, l:today_done, l:streak_days))
+  
+  " SRS details line (replaces old Count/Hard line)
+  let l:reps   = get(l:res, 'reps', 0)
+  let l:lapses = get(l:res, 'lapses', 0)
+  let l:wrong  = get(l:res, 'wrong_streak', 0)
+
+  let l:due_raw = get(l:res, 'due_at', '')
+  let l:due_s = ''
+  if type(l:due_raw) == v:t_number
+    let l:due_s = strftime('%Y-%m-%d %H:%M', l:due_raw)
+  elseif type(l:due_raw) == v:t_string && l:due_raw =~# '^\d\+$'
+    let l:due_s = strftime('%Y-%m-%d %H:%M', str2nr(l:due_raw))
   else
-    call add(l:lines, printf('DeepL Trainer (%s -> %s)%s  Count:%d  Hard:%d',
-          \ l:filter, l:lang, l:mode_suffix, l:count, l:hard))
+    let l:due_s = string(l:due_raw)
   endif
+
+  call add(l:lines, printf('✅ reps:%d  🔁 lapses:%d ⚠️  wrong:%d  ⏳ due:%s',
+        \ l:reps, l:lapses, l:wrong, l:due_s))
+
   call add(l:lines, l:sep)
 
-  " Card
-  call add(l:lines, 'UNIT: ' . l:word)
-
+  " Card (UNIT + TRN on the same line)
   if a:show_translation
-    call add(l:lines, 'TRN:  ' . l:tr)
+    call add(l:lines, 'UNIT: ' . l:word . '    TRN:  ' . l:tr)
   else
-    call add(l:lines, 'TRN:  ???   (press "s" to show)')
+    call add(l:lines, 'UNIT: ' . l:word . '    TRN:  ???   (press "s" to show)')
   endif
 
   " Context (up to 2 lines)
@@ -337,6 +350,63 @@ function! DeepLTrainerRender(show_translation) abort
     if len(l:ctx_lines) > 1
       call add(l:lines, '      ' . l:ctx_lines[1])
     endif
+  endif
+  
+  " --- GRAMMAR (MW) ---
+  let l:g = get(l:res, 'grammar', {})
+  if type(l:g) == v:t_dict && !empty(l:g)
+    call add(l:lines, 'GRAMMAR:')
+
+    let l:gw  = get(l:g, 'word', '')
+    let l:pos = get(l:g, 'pos', get(l:g, 'fl', get(l:g, 'part_of_speech', '')))
+
+    if !empty(l:gw) || !empty(l:pos)
+      let l:line = '  Word: ' . l:gw
+      if !empty(l:pos)
+        let l:line .= '   Part of Speech: ' . l:pos
+      endif
+      call add(l:lines, l:line)
+    endif
+
+    let l:stems = get(l:g, 'stems', [])
+    if type(l:stems) == v:t_list && !empty(l:stems)
+      let l:st = 'Stems: ' . join(l:stems, ', ')
+      let l:wrapped = s:deepl_wrap(l:st, l:width - 4, 2)  " -4 чтобы учесть будущий отступ
+
+      if !empty(l:wrapped)
+        call add(l:lines, '  ' . l:wrapped[0])
+        if len(l:wrapped) > 1
+          call add(l:lines, '  ' . repeat(' ', strlen('Stems: ')) . l:wrapped[1])
+        endif
+      endif
+    endif
+
+    let l:defs = get(l:g, 'shortdef', [])
+    if type(l:defs) == v:t_list && !empty(l:defs)
+      call add(l:lines, '  Basic definitions:')
+      for l:d in l:defs
+        " wrap each definition nicely
+        let l:wrapped = s:deepl_wrap('- ' . l:d, l:width - 4, 3)
+        if !empty(l:wrapped)
+          call add(l:lines, '    ' . l:wrapped[0])
+          if len(l:wrapped) > 1 | call add(l:lines, '    ' . l:wrapped[1]) | endif
+          if len(l:wrapped) > 2 | call add(l:lines, '    ' . l:wrapped[2]) | endif
+        endif
+      endfor
+    endif
+    
+    " Add etymology at the end if exists
+    let l:ety = get(l:g, 'etymology', '')
+    if !empty(l:ety)
+      let l:wrapped = s:deepl_wrap(l:ety, l:width - 4, 3)
+      if !empty(l:wrapped)
+        call add(l:lines, '  ' . l:wrapped[0])
+        if len(l:wrapped) > 1 | call add(l:lines, '  ' . l:wrapped[1]) | endif
+        if len(l:wrapped) > 2 | call add(l:lines, '  ' . l:wrapped[2]) | endif
+      endif
+    endif
+
+    call add(l:lines, '')
   endif
 
   call add(l:lines, '')
@@ -348,7 +418,7 @@ function! DeepLTrainerRender(show_translation) abort
   call add(l:lines, l:sep)
 
   " Footer (keys must match mappings)
-  call add(l:lines, 'Keys: 0..5 grade   s show   n skip   x hard   d ignore   q close   a again(0)')
+  call add(l:lines, 'Keys: 0,1,2,3,4,5 grade • s show • n skip • q close')
 
   " Write to trainer buffer without switching windows
   call setbufvar(g:deepl_trainer_bufnr, '&modifiable', 1)
@@ -587,10 +657,10 @@ function! deepl#trainer_apply_hl(bufnr, word, tr, show) abort
 
   " Highlight TRN value (only when shown)
   if a:show
-    let l:ln = search('^TRN:\s*', 'nW')
+    let l:ln = search('TRN:\s*', 'nW')
     if l:ln > 0 && !empty(a:tr)
       let l:line = getline(l:ln)
-      let l:col0 = matchend(l:line, '^TRN:\s*') + 1
+      let l:col0 = matchend(l:line, 'TRN:\s*') + 1
       if l:col0 > 0
         call add(w:deepl_trainer_match_ids,
               \ matchaddpos('DeepLTrainerTranslationWord', [[l:ln, l:col0, strlen(a:tr)]]))
@@ -902,7 +972,8 @@ function! DeepLTrainerIgnore() abort
     return
   endif
 
-  let l:word = get(g:deepl_trainer_current, 'word', '')
+  let l:word = get(g:deepl_trainer_current, 'term', get(g:deepl_trainer_current, 'word', '')) 
+  let l:entry_id = get(g:deepl_trainer_current, 'entry_id', 0)
   if empty(l:word)
     return
   endif
@@ -916,7 +987,7 @@ function! DeepLTrainerIgnore() abort
 
   " Asynchronously mark word as ignored in Python
   if g:deepl_backend ==# 'http'
-    let l:payload = json_encode({'word': l:word, 'src_filter': l:src})
+    let l:payload = json_encode({'entry_id': l:entry_id, 'word': l:word, 'src_filter': l:src}) 
     let l:cmd = [
           \ 'curl', '-sS',
           \ '-X', 'POST',
@@ -948,6 +1019,7 @@ function! DeepLTrainerIgnore() abort
 
   " Load next word right away
   call DeepLTrainerNext()
+  echo 'Ignored: ' . l:word
 endfunction
 
 " Review current card with a grade (0..5) and load next item
@@ -1103,8 +1175,8 @@ function! deepl#trainer_start() abort
   nnoremap <silent> <buffer> q :DeepLStudyClose<CR>
   nnoremap <silent> <buffer> n :call DeepLTrainerSkip()<CR>
   nnoremap <silent> <buffer> s :call DeepLTrainerShow()<CR>
-  nnoremap <silent> <buffer> x :call DeepLTrainerMarkHard()<CR>
-  nnoremap <silent> <buffer> d :call DeepLTrainerIgnore()<CR>
+  "nnoremap <silent> <buffer> x :call DeepLTrainerMarkHard()<CR>
+  "nnoremap <silent> <buffer> d :call DeepLTrainerIgnore()<CR>
 
   " Grades 0..5 (SRS review)
   nnoremap <silent> <buffer> 0 :call DeepLTrainerReview(0)<CR>
@@ -1115,7 +1187,7 @@ function! deepl#trainer_start() abort
   nnoremap <silent> <buffer> 5 :call DeepLTrainerReview(5)<CR>
 
   " Quick 'again' (alias for grade 0)
-  nnoremap <silent> <buffer> a :call DeepLTrainerReview(0)<CR>
+  "nnoremap <silent> <buffer> a :call DeepLTrainerReview(0)<CR>
 
   setlocal nomodifiable
 
@@ -1184,19 +1256,60 @@ function! s:DeepLWordExit(channel, status) abort
 endfunction
 
 " -------------------------------------------------------
+" Extract a short “sentence-like” context around the cursor from the current line:
+" find nearest punctuation boundaries (. ! ? : ;) left/right of the cursor, trim, and cap length (used as DeepL context).
+
 function! s:deepl_sentence_context() abort
-  let l:line = getline('.')
-  if empty(l:line)
+  " 1) Take paragraph (between blank lines) instead of a single line
+  let l:start = search('^\s*$', 'bnW') + 1
+  if l:start <= 0 | let l:start = 1 | endif
+
+  let l:end = search('^\s*$', 'nW') - 1
+  if l:end <= 0 | let l:end = line('$') | endif
+  if l:end < l:start | let l:end = l:start | endif
+
+  let l:lines = getline(l:start, l:end)
+  if empty(l:lines)
     return ''
   endif
 
-  let l:col = col('.') - 1
-  if l:col < 0
-    let l:col = 0
+  " 2) Build a single text line from the paragraph, keep a raw version to compute offsets
+  let l:text_raw = substitute(join(l:lines, ' '), '\s\+', ' ', 'g')
+
+  " 3) Compute cursor index inside the joined paragraph
+  let l:cur_lnum = line('.')
+  let l:cur_col0 = col('.') - 1
+  if l:cur_col0 < 0 | let l:cur_col0 = 0 | endif
+
+  " Clamp col to the current line length
+  let l:cur_line = getline(l:cur_lnum)
+  if l:cur_col0 > strlen(l:cur_line)
+    let l:cur_col0 = strlen(l:cur_line)
   endif
 
-  " Sentence boundaries (left side) by literal chars: . ! ? : ;
-  let l:prefix = strpart(l:line, 0, l:col)
+  " Sum lengths of lines before current one (+1 for the join-space)
+  let l:idx = 0
+  let l:before = l:cur_lnum - l:start
+  if l:before > 0
+    for l:i in range(0, l:before - 1)
+      let l:idx += strlen(l:lines[l:i]) + 1
+    endfor
+  endif
+  let l:idx += l:cur_col0
+
+  " 4) Trim (may shift idx if paragraph starts with spaces)
+  let l:lead = strlen(matchstr(l:text_raw, '^\s*'))
+  let l:text = trim(l:text_raw)
+  let l:idx -= l:lead
+  if l:idx < 0 | let l:idx = 0 | endif
+  if l:idx > strlen(l:text) | let l:idx = strlen(l:text) | endif
+
+  if empty(l:text)
+    return ''
+  endif
+
+  " 5) Find sentence boundaries around idx
+  let l:prefix = strpart(l:text, 0, l:idx)
 
   let l:left_dot = strridx(l:prefix, '.')
   let l:left_exc = strridx(l:prefix, '!')
@@ -1204,26 +1317,26 @@ function! s:deepl_sentence_context() abort
   let l:left_col = strridx(l:prefix, ':')
   let l:left_sem = strridx(l:prefix, ';')
 
-  let l:start = max([l:left_dot, l:left_exc, l:left_q, l:left_col, l:left_sem]) + 1
+  let l:sent_start = max([l:left_dot, l:left_exc, l:left_q, l:left_col, l:left_sem]) + 1
 
   " Sentence boundaries (right side) using match() patterns.
-  " IMPORTANT: '?' must be escaped as '\?' in Vim regex.
-  let l:end = -1
-  " IMPORTANT: use literal '?' (NOT '\?') because '\?' is a quantifier in Vim regex.
-  for l:pat in ['\.', '!', '?', ':', ';']
-    let l:p = match(l:line, l:pat, l:col)
-    if l:p != -1 && (l:end == -1 || l:p < l:end)
-      let l:end = l:p
+  let l:sent_end = -1
+  for l:pat in ['\V.', '\V!', '\V?', '\V:', '\V;']
+    let l:p = match(l:text, l:pat, l:idx)
+    if l:p != -1 && (l:sent_end == -1 || l:p < l:sent_end)
+      let l:sent_end = l:p
     endif
   endfor
 
-  if l:end == -1
-    let l:sent = strpart(l:line, l:start)
+  if l:sent_end == -1
+    let l:sent = strpart(l:text, l:sent_start)
   else
-    let l:sent = strpart(l:line, l:start, (l:end - l:start + 1))
+    let l:sent = strpart(l:text, l:sent_start, (l:sent_end - l:sent_start + 1))
   endif
 
   let l:sent = trim(l:sent)
+
+  " Limit for DeepL context
   if strchars(l:sent) > 400
     let l:sent = strcharpart(l:sent, 0, 400)
   endif
@@ -1328,12 +1441,12 @@ function! deepl#show_defs() abort
 
   " Determine source label.
   let l:from_cache   = get(l:resp, 'from_cache', v:false)
-let l:cache_source = get(l:resp, 'cache_source', '')
+  let l:cache_source = get(l:resp, 'cache_source', '')
 
-" Source label:
-" - from_cache=true  -> Dictionary (SQLite)
-" - from_cache=false -> DeepL API (fresh request)
-let l:src_label = l:from_cache ? 'Dictionary' : 'DeepL API'
+  " Source label:
+  " - from_cache=true  -> Dictionary (SQLite)
+  " - from_cache=false -> DeepL API (fresh request)
+  let l:src_label = l:from_cache ? 'Dictionary' : 'DeepL API'
 
   " Build right-side tag: SRC + optional CTX
   let l:src_tag = 'SRC: ' . l:src_label
@@ -1376,6 +1489,10 @@ let l:src_label = l:from_cache ? 'Dictionary' : 'DeepL API'
   endif
 
   call s:deepl_show_defs_buffer(l:lines, '-  MW  -')
+endfunction
+
+function! deepl#debug_sentence_context() abort
+  return s:deepl_sentence_context()
 endfunction
 
 " -------------------------------------------------------

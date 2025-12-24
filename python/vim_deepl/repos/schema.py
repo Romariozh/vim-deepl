@@ -88,6 +88,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
              src_lang     TEXT NOT NULL,
              dst_lang     TEXT NOT NULL,
              ctx_hash     TEXT NOT NULL,
+             ctx_text     TEXT,
              created_at   TEXT NOT NULL,
              last_used    TEXT,
              count        INTEGER NOT NULL DEFAULT 0,

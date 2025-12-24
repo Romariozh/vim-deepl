@@ -128,7 +128,7 @@ class TrainerService:
                     item["mode"] = "srs_new"
                     return finalize(item)
 
-            hard = self.repo._list_hard_entries_conn(conn, src_langs, limit=1, exclude_card_ids=exclude_card_ids)
+            hard = self.repo._list_hard_entries_conn(conn, src_langs, now_ts=now_ts, limit=1, exclude_card_ids=exclude_card_ids)
             if hard:
                 item = hard[0]
                 item["mode"] = "srs_hard"

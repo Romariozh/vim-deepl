@@ -137,22 +137,33 @@ class TranslationRepo:
         dst_lang: str,
         ctx_hash: str,
         now_s: str,
+        ctx_text: str = "",
     ) -> None:
         with self.db.tx() as conn:
             ensure_schema(conn)
+
+            # Normalize context text for storage
+            ctx_text = " ".join((ctx_text or "").split())
+
             conn.execute(
                 """
                 INSERT INTO entries_ctx (
                     term, translation, src_lang, dst_lang, ctx_hash,
+                    ctx_text,
                     created_at, last_used, count
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(term, src_lang, dst_lang, ctx_hash) DO UPDATE SET
                     translation = excluded.translation,
                     last_used   = excluded.last_used,
-                    count       = entries_ctx.count + 1
+                    count       = entries_ctx.count + 1,
+                    ctx_text    = CASE
+                                    WHEN excluded.ctx_text IS NOT NULL AND excluded.ctx_text != ''
+                                    THEN excluded.ctx_text
+                                    ELSE entries_ctx.ctx_text
+                                  END
                 """,
-                (term, translation, src_lang, dst_lang, ctx_hash, now_s, now_s),
+                (term, translation, src_lang, dst_lang, ctx_hash, ctx_text, now_s, now_s),
             )
 
     # -------------------------

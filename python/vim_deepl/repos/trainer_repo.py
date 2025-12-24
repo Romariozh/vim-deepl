@@ -282,7 +282,22 @@ class TrainerRepo:
             e.src_lang,
             e.dst_lang,
             e.detected_raw AS detected_raw,
-            e.detected_raw AS context_raw
+            COALESCE(
+              (
+                SELECT x.ctx_text
+                FROM entries_ctx x
+                WHERE x.term = e.term
+                  AND x.src_lang = e.src_lang
+                  AND x.dst_lang = e.dst_lang
+                  AND x.ctx_text IS NOT NULL
+                  AND x.ctx_text != ''
+                ORDER BY
+                  COALESCE(x.last_used, x.created_at) DESC,
+                  x.count DESC,
+                  x.id DESC
+                LIMIT 1
+              ),
+            '') AS context_raw
         FROM training_cards c
         JOIN entries e ON e.id = c.entry_id
         WHERE c.suspended = 0
@@ -306,8 +321,6 @@ class TrainerRepo:
         """
 
         args: list[Any] = []
-        # NOTE: exclude goes BEFORE now_ts in SQL above? No — it's before <= ? but doesn't consume params.
-        # Param order in query: (exclude args...) then now_ts then src_langs then limit
         args.extend(exclude_args)
         args.append(now_ts)
         args.extend(src_langs)
@@ -325,7 +338,6 @@ class TrainerRepo:
     ) -> list[dict[str, Any]]:
         if not src_langs:
             return []
-
         placeholders = ",".join(["?"] * len(src_langs))
 
         # "New" = entries without any training card yet
@@ -338,7 +350,22 @@ class TrainerRepo:
             e.src_lang,
             e.dst_lang,
             e.detected_raw AS detected_raw,
-            e.detected_raw AS context_raw,
+            COALESCE(
+              (
+                SELECT x.ctx_text
+                FROM entries_ctx x
+                WHERE x.term = e.term
+                  AND x.src_lang = e.src_lang
+                  AND x.dst_lang = e.dst_lang
+                  AND x.ctx_text IS NOT NULL
+                  AND x.ctx_text != ''
+                ORDER BY
+                  COALESCE(x.last_used, x.created_at) DESC,
+                  x.count DESC,
+                  x.id DESC
+                LIMIT 1
+              ),
+            '') AS context_raw,
             NULL AS due_at,
             0 AS lapses,
             0 AS wrong_streak
@@ -356,11 +383,11 @@ class TrainerRepo:
         rows = conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
 
-
     def _list_hard_entries_conn(
         self,
         conn,
         src_langs: list[str],
+        now_ts: int,
         limit: int,
         exclude_card_ids: Optional[list[int]] = None,
     ) -> list[dict[str, Any]]:
@@ -379,33 +406,67 @@ class TrainerRepo:
         sql = f"""
         SELECT
             c.id AS card_id,
-            e.id AS entry_id,
+            c.entry_id AS entry_id,
+
+            -- Normalize due_at: if it's milliseconds (13+ digits) -> seconds
+            CASE
+              WHEN CAST(c.due_at AS INTEGER) > 100000000000
+              THEN CAST(CAST(c.due_at AS INTEGER) / 1000 AS INTEGER)
+              ELSE CAST(c.due_at AS INTEGER)
+            END AS due_at,
+
+            c.lapses,
+            c.wrong_streak,
+
             e.term,
             e.translation,
             e.src_lang,
             e.dst_lang,
             e.detected_raw AS detected_raw,
-            e.detected_raw AS context_raw,
-            c.due_at,
-            c.lapses,
-            c.wrong_streak
+            COALESCE(
+              (
+                SELECT x.ctx_text
+                FROM entries_ctx x
+                WHERE x.term = e.term
+                  AND x.src_lang = e.src_lang
+                  AND x.dst_lang = e.dst_lang
+                  AND x.ctx_text IS NOT NULL
+                  AND x.ctx_text != ''
+                ORDER BY
+                  COALESCE(x.last_used, x.created_at) DESC,
+                  x.count DESC,
+                  x.id DESC
+                LIMIT 1
+              ),
+            '') AS context_raw
         FROM training_cards c
         JOIN entries e ON e.id = c.entry_id
         WHERE c.suspended = 0
           AND c.entry_id IS NOT NULL
           AND e.ignore = 0
-          AND e.src_lang IN ({placeholders})
+          AND c.due_at IS NOT NULL
           {exclude_sql}
+          AND (
+            CASE
+              WHEN CAST(c.due_at AS INTEGER) > 100000000000
+              THEN CAST(CAST(c.due_at AS INTEGER) / 1000 AS INTEGER)
+              ELSE CAST(c.due_at AS INTEGER)
+            END
+          ) <= ?
+          AND e.src_lang IN ({placeholders})
         ORDER BY
           c.lapses DESC,
           c.wrong_streak DESC,
-          COALESCE(c.last_review_at, 0) ASC
+          due_at ASC,
+          COALESCE(CAST(c.last_review_at AS INTEGER), 0) ASC
         LIMIT ?
         """
 
         args: list[Any] = []
-        args.extend(src_langs)
+        # Param order: (exclude args...) then now_ts then src_langs then limit
         args.extend(exclude_args)
+        args.append(now_ts)
+        args.extend(src_langs)
         args.append(limit)
 
         rows = conn.execute(sql, args).fetchall()

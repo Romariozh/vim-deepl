@@ -1,6 +1,9 @@
 import os
 import sys
-from typing import Optional
+import sqlite3
+import json
+import re
+from typing import Optional, Any, Dict, List
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -23,7 +26,7 @@ from vim_deepl.services.trainer_service import TrainerConfig
 app = FastAPI(title="Local Dict API")
 
 DICT_BASE = os.path.expanduser("~/.local/share/vim-deepl")
-
+_MW_TAG_RE = re.compile(r"\{[^}]+\}")  # strips {it} {/it} {bc} {ldquo} {sx|...} etc.
 
 @app.on_event("startup")
 def _startup() -> None:
@@ -65,8 +68,9 @@ class TrainReviewRequest(BaseModel):
     src_filter: str | None = None
 
 class MarkRequest(BaseModel):
-    word: str
     src_filter: str
+    word: Optional[str] = None
+    entry_id: Optional[int] = None
 
 class SelectionRequest(BaseModel):
     text: str
@@ -184,22 +188,97 @@ def api_train_next(payload: TrainNextRequest):
         parse_dt=parse_dt,
         exclude_card_ids=payload.exclude_card_ids,
     )
+
+    # Attach deck stats (mastery) if possible
+    if isinstance(result, dict) and not result.get("error"):
+        try:
+            db_path = _guess_vocab_db_path(DICT_BASE)
+            _attach_ctx_and_detected(db_path, result, payload.src_filter)
+
+            # Attach SRS fields (reps/lapses/wrong_streak/...)
+            cid = result.get("card_id")
+            if cid is not None:
+                srs = _trainer_card_srs_fields(db_path, int(cid))
+                for k, v in srs.items():
+                    # Do not overwrite if backend already returned the field
+                    if k not in result or result.get(k) is None:
+                        result[k] = v
+
+            # Attach stats (mastery)
+            src = payload.src_filter or result.get("src_lang") or None
+            result["stats"] = _trainer_stats(db_path, src, mastery_count)
+
+            # Attach grammar (MW)
+            term = (result.get("term") or "").strip()
+            src_lang = (result.get("src_lang") or payload.src_filter or "EN").strip()
+            if term:
+                g = _mw_attach_grammar(db_path, term, src_lang)
+                if g:
+                    result["grammar"] = g
+
+        except Exception:
+            pass
+
     return result
 
 @app.post("/train/review")
 def api_train_review(payload: TrainReviewRequest):
+    cfg = load_config()
+    mastery_count = getattr(cfg, "trainer_mastery_count", 7)
+
     argv = ["dict_api", "review", DICT_BASE, payload.src_filter or "", str(payload.card_id), str(payload.grade)]
-    return _dispatch_data(argv)
+    result = _dispatch_data(argv)
+
+    # Attach deck stats/grammar/SRS just like /train/next
+    if isinstance(result, dict) and not result.get("error"):
+        try:
+            db_path = _guess_vocab_db_path(DICT_BASE)
+            _attach_ctx_and_detected(db_path, result, payload.src_filter)
+
+            # Attach SRS fields (reps/lapses/wrong_streak/...)
+            cid = result.get("card_id")
+            if cid is not None:
+                srs = _trainer_card_srs_fields(db_path, int(cid))
+                for k, v in srs.items():
+                    if k not in result or result.get(k) is None:
+                        result[k] = v
+
+            # Attach stats (mastery)
+            src = payload.src_filter or result.get("src_lang") or None
+            result["stats"] = _trainer_stats(db_path, src, mastery_count)
+
+            # Attach grammar (MW)
+            term = (result.get("term") or "").strip()
+            src_lang = (result.get("src_lang") or payload.src_filter or "EN").strip()
+            if term:
+                g = _mw_attach_grammar(db_path, term, src_lang)
+                if g:
+                    result["grammar"] = g
+
+        except Exception:
+            pass
+
+    return result
 
 @app.post("/train/mark_hard")
 def api_mark_hard(payload: MarkRequest):
     argv = ["dict_api", "mark_hard", DICT_BASE, payload.src_filter, payload.word]
     return _dispatch_data(argv)
 
-
 @app.post("/train/mark_ignore")
 def api_mark_ignore(payload: MarkRequest):
-    argv = ["dict_api", "ignore", DICT_BASE, payload.src_filter, payload.word]
+    # Prefer exact ignore by entry_id when available.
+    if payload.entry_id is not None:
+        db_path = _guess_vocab_db_path(DICT_BASE)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE entries SET ignore=1 WHERE id=?", (int(payload.entry_id),))
+            # Optional: also suspend related training card(s) to be safe.
+            conn.execute("UPDATE training_cards SET suspended=1 WHERE entry_id=?", (int(payload.entry_id),))
+            conn.commit()
+        return {"ignored": True, "entry_id": int(payload.entry_id)}
+
+    # Backward-compatible fallback: ignore by (src_filter, word)
+    argv = ["dict_api", "ignore", DICT_BASE, payload.src_filter, payload.word or ""]
     return _dispatch_data(argv)
 
 def _dispatch_data(argv: list[str]) -> dict:
@@ -207,5 +286,330 @@ def _dispatch_data(argv: list[str]) -> dict:
     if not resp.get("ok"):
         err = resp.get("error") or {"message": "Unknown error"}
         raise HTTPException(status_code=500, detail=err)
-    return resp["data"]
+    data = resp["data"]
+    data = _maybe_attach_trainer_stats(argv, data)
+    return data
+
+def _guess_vocab_db_path(dict_base: str) -> str:
+    """
+    Try to locate vocab.db.
+    Priority:
+      1) <DICT_BASE>/vocab.db
+      2) ~/.local/share/vim-deepl/vocab.db
+    """
+    p1 = os.path.join(dict_base, "vocab.db")
+    if os.path.isfile(p1):
+        return p1
+    p2 = os.path.expanduser("~/.local/share/vim-deepl/vocab.db")
+    if os.path.isfile(p2):
+        return p2
+    return p1  # fallback (may not exist)
+
+def _trainer_stats(db_path: str, src_filter: str | None, mastery_count: int) -> dict:
+    con = sqlite3.connect(db_path)
+    try:
+        cur = con.cursor()
+
+        where = "suspended=0"
+        args: list = []
+        if src_filter:
+            where += " AND src_lang=?"
+            args.append(src_filter)
+
+        cur.execute(f"SELECT COUNT(*) FROM training_cards WHERE {where}", args)
+        total = int(cur.fetchone()[0] or 0)
+
+        cur.execute(
+            f"SELECT COUNT(*) FROM training_cards WHERE {where} AND correct_streak >= ?",
+            args + [int(mastery_count)],
+        )
+        mastered = int(cur.fetchone()[0] or 0)
+
+        percent = int(round((mastered * 100.0) / total)) if total > 0 else 0
+
+        return {
+            "total": total,
+            "mastered": mastered,
+            "mastery_threshold": int(mastery_count),
+            "mastery_percent": percent,
+        }
+    finally:
+        con.close()
+
+def _trainer_card_srs_fields(db_path: str, card_id: int) -> dict:
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    try:
+        row = con.execute(
+            """
+            SELECT reps, lapses, wrong_streak, correct_streak, interval_days, ef, due_at, last_grade
+            FROM training_cards
+            WHERE id = ?
+            """,
+            (int(card_id),),
+        ).fetchone()
+        if not row:
+            return {}
+        return {
+            "reps": int(row["reps"] or 0),
+            "lapses": int(row["lapses"] or 0),
+            "wrong_streak": int(row["wrong_streak"] or 0),
+            "correct_streak": int(row["correct_streak"] or 0),
+            "interval_days": float(row["interval_days"] or 0.0),
+            "ef": float(row["ef"] or 2.5),
+            "due_at": row["due_at"],
+            "last_grade": int(row["last_grade"] or 0) if row["last_grade"] is not None else None,
+        }
+    finally:
+        con.close()
+
+def _attach_stats_if_possible(result: object, src_filter: str | None, mastery_count: int) -> object:
+    if not isinstance(result, dict) or result.get("error"):
+        return result
+    try:
+        db_path = _guess_vocab_db_path(DICT_BASE)
+        src = src_filter or result.get("src_lang") or None
+        result["stats"] = _trainer_stats(db_path, src, mastery_count)
+    except Exception:
+        pass
+    return result
+
+def _maybe_attach_trainer_stats(argv: list[str], data: Any) -> Any:
+    """
+    Attach trainer deck stats to responses returned via CLI dispatcher.
+    This is intentionally conservative: we only attach stats for known trainer ops
+    and only when the returned payload looks like a trainer card.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    # Only for trainer-related dispatched commands
+    op = argv[1] if len(argv) > 1 else ""
+    trainer_ops = {
+        "review",
+        "mark_hard",
+        "ignore",
+        "skip",
+        "suspend",
+        "unsuspend",
+        "mark_known",
+    }
+    if op not in trainer_ops:
+        return data
+
+    # Only attach when response resembles a trainer card payload
+    looks_like_card = (
+        "card_id" in data
+        or "entry_id" in data
+        or "term" in data
+        or "translation" in data
+        or "src_lang" in data
+    )
+    if not looks_like_card:
+        return data
+
+    try:
+        cfg = load_config()
+        mastery_count = getattr(cfg, "trainer_mastery_count", 7)
+
+        # argv shape for trainer ops is typically:
+        # ["dict_api", <op>, DICT_BASE, <src_filter>, ...]
+        src_filter = argv[3] if len(argv) > 3 else ""
+        src_filter = (src_filter or data.get("src_lang") or "").strip() or None
+
+        db_path = _guess_vocab_db_path(DICT_BASE)
+
+        # Attach SRS fields from SQLite (reps/lapses/wrong_streak/...)
+        cid = data.get("card_id")
+        if cid is not None:
+            srs = _trainer_card_srs_fields(db_path, int(cid))
+            for k, v in srs.items():
+                if k not in data or data.get(k) is None:
+                    data[k] = v
+
+        # Attach mastery stats
+        data["stats"] = _trainer_stats(db_path, src_filter, int(mastery_count))
+
+    except Exception:
+        # Never break trainer flow because of stats
+        pass
+
+    return data
+
+
+def _mw_clean(s: str) -> str:
+    if not s:
+        return ""
+    s = _MW_TAG_RE.sub("", s)
+    s = " ".join(s.split())
+    return s.strip()
+
+def _mw_guess_raw_payload(row_dict: dict) -> Optional[str]:
+    # Try known names first
+    for k in ("raw", "mw_raw", "raw_json", "payload", "mw_payload"):
+        v = row_dict.get(k)
+        if isinstance(v, str) and v.lstrip().startswith("["):
+            return v
+    # Fallback: detect “MW-like” json in any column
+    for v in row_dict.values():
+        if isinstance(v, str) and v.lstrip().startswith("[") and '"meta"' in v and '"stems"' in v:
+            return v
+    return None
+
+import json, re, sqlite3
+
+def _mw_clean(s: str) -> str:
+    if not s:
+        return ""
+    # базовая чистка mw-разметки
+    s = s.replace("{bc}", "").replace("{ldquo}", '"').replace("{rdquo}", '"')
+    s = s.replace("{it}", "").replace("{/it}", "")
+    # всё вида {sx|embrace:1||1} и т.п.
+    s = re.sub(r"\{[^}]+\}", "", s)
+    return " ".join(s.split()).strip()
+
+def _mw_attach_grammar(db_path: str, term: str, src_lang: str) -> dict | None:
+    term = (term or "").strip()
+    src_lang = (src_lang or "EN").upper()
+    if not term:
+        return None
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(mw_definitions)")]
+        # найди колонку с raw-json
+        raw_col = next((c for c in ["raw_json", "raw", "payload", "data", "json_data"] if c in cols), None)
+        if not raw_col:
+            return None
+
+        row = conn.execute(
+            f"SELECT {raw_col} AS raw FROM mw_definitions WHERE term=? AND src_lang=? ORDER BY id DESC LIMIT 1",
+            (term, src_lang),
+        ).fetchone()
+        if not row or not row["raw"]:
+            return None
+
+        items = json.loads(row["raw"])
+        if not isinstance(items, list) or not items:
+            return None
+
+        # word (лемма) — из meta.id типа "fold:2" => "fold"
+        meta_id = (items[0].get("meta", {}) or {}).get("id", "") or term
+        word = meta_id.split(":")[0] if isinstance(meta_id, str) else term
+
+        # stems
+        stems = (items[0].get("meta", {}) or {}).get("stems", []) or []
+        stems = [s for s in stems if isinstance(s, str)]
+        # part of speech
+        pos = items[0].get("fl", "")
+        pos = pos.capitalize() if isinstance(pos, str) else ""
+
+        # shortdef (склеим уникальные)
+        defs = []
+        for it in items:
+            sd = it.get("shortdef") or []
+            if isinstance(sd, list):
+                defs.extend([_mw_clean(x) for x in sd if isinstance(x, str)])
+        # unique preserving order
+        seen = set()
+        shortdef = []
+        for d in defs:
+            if d and d not in seen:
+                seen.add(d)
+                shortdef.append(d)
+
+        # etymology: ищем it["et"] -> [["text","..."], ...]
+        ety = ""
+        for it in items:
+            et = it.get("et")
+            if isinstance(et, list):
+                parts = []
+                for chunk in et:
+                    if isinstance(chunk, list) and len(chunk) >= 2 and chunk[0] == "text":
+                        parts.append(_mw_clean(str(chunk[1])))
+                ety = " ".join([p for p in parts if p]).strip()
+                if ety:
+                    break
+
+        out = {
+            "word": word,
+            "stems": stems,
+            "shortdef": shortdef[:6],          # чтобы не раздувать UI
+            "part_of_speech": pos,
+            "etymology": ety,
+        }
+        # если совсем пусто — не показываем
+        if not (out["stems"] or out["shortdef"] or out["part_of_speech"] or out["etymology"]):
+            return None
+        return out
+    finally:
+        conn.close()
+
+def _attach_ctx_and_detected(db_path: str, result: dict, src_filter: str | None = None) -> None:
+    term = (result.get("term") or "").strip()
+    if not term:
+        return
+
+    src_lang = (result.get("src_lang") or src_filter or "EN").strip().upper()
+    dst_lang = (result.get("dst_lang") or result.get("target_lang") or "RU").strip().upper()
+
+    need_detected = result.get("detected_raw") in (None, "")
+    need_ctx = result.get("context_raw") in (None, "")
+
+    if not (need_detected or need_ctx):
+        return
+
+    con = sqlite3.connect(db_path)
+    try:
+        con.row_factory = sqlite3.Row
+
+        detected_raw = None
+        if need_detected or need_ctx:
+            row = con.execute(
+                """
+                SELECT detected_raw
+                FROM entries
+                WHERE term = ? AND src_lang = ? AND dst_lang = ?
+                LIMIT 1
+                """,
+                (term, src_lang, dst_lang),
+            ).fetchone()
+            if row:
+                detected_raw = row["detected_raw"]
+
+        ctx_text = None
+        if need_ctx:
+            row = con.execute(
+                """
+                SELECT x.ctx_text
+                FROM entries_ctx x
+                WHERE x.term = ?
+                  AND x.src_lang = ?
+                  AND x.dst_lang = ?
+                  AND x.ctx_text IS NOT NULL
+                  AND x.ctx_text != ''
+                ORDER BY COALESCE(x.last_used, x.created_at) DESC,
+                         x.count DESC,
+                         x.id DESC
+                LIMIT 1
+                """,
+                (term, src_lang, dst_lang),
+            ).fetchone()
+            if row:
+                ctx_text = row["ctx_text"]
+
+        # Fill gaps:
+        if need_detected and detected_raw:
+            result["detected_raw"] = detected_raw
+
+        if need_ctx:
+            # prefer ctx_text, else fall back to detected_raw
+            if ctx_text:
+                result["context_raw"] = ctx_text
+            elif detected_raw:
+                result["context_raw"] = detected_raw
+
+    finally:
+        con.close()
 

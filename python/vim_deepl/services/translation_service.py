@@ -121,7 +121,8 @@ class TranslationService:
             self.repo.upsert_base_entry(word, tr, src, target_lang, detected, now_s, context=context)
 
             # write context entry
-            self.repo.upsert_ctx_entry(word, tr, src, target_lang, h, now_s)
+            ctx_text = " ".join(ctx.split())  # normalize spaces/newlines
+            self.repo.upsert_ctx_entry(word, tr, src, target_lang, h, now_s, ctx_text=context)
 
             mw_defs = self._ensure_mw_definitions(word, src, now_s)
 
