@@ -344,7 +344,7 @@ function! DeepLTrainerRender(show_translation) abort
   endif
 
   " Context (up to 2 lines)
-  let l:ctx_lines = s:deepl_wrap(l:ctx, l:width - 6, 2)
+  let l:ctx_lines = s:deepl_wrap(l:ctx, l:width - 6, 3)
   if !empty(l:ctx_lines)
     call add(l:lines, 'CTX:  ' . l:ctx_lines[0])
     if len(l:ctx_lines) > 1
@@ -457,6 +457,27 @@ function! s:deepl_one_line(text) abort
 endfunction
 " -------------------------------------------------------
 " Simple word wrap: returns up to a:max_lines lines, each within a:width
+" Add ellipsis to a line and keep it within display width
+function! s:deepl_add_ellipsis(line, width) abort
+  let l:s = a:line
+  if a:width <= 1
+    return '…'
+  endif
+
+  " If it already fits with ellipsis, just append
+  if strdisplaywidth(l:s . '…') <= a:width
+    return l:s . '…'
+  endif
+
+  " Otherwise trim chars until it fits
+  while strchars(l:s) > 0 && strdisplaywidth(l:s . '…') > a:width
+    let l:s = strcharpart(l:s, 0, strchars(l:s) - 1)
+  endwhile
+
+  return (empty(l:s) ? '…' : l:s . '…')
+endfunction
+" -------------------------------------------------------
+" Simple word wrap: returns up to a:max_lines lines, each within a:width
 function! s:deepl_wrap(text, width, max_lines) abort
   let l:t = s:deepl_one_line(a:text)
   if empty(l:t) || a:width <= 5
@@ -474,9 +495,13 @@ function! s:deepl_wrap(text, width, max_lines) abort
       let l:cur .= ' ' . l:w
     else
       call add(l:out, l:cur)
+
+      " Reached max lines -> truncate with ellipsis
       if len(l:out) >= a:max_lines
+        let l:out[-1] = s:deepl_add_ellipsis(l:out[-1], a:width)
         return l:out
       endif
+
       let l:cur = l:w
     endif
   endfor

@@ -219,6 +219,10 @@ def api_train_next(payload: TrainNextRequest):
         except Exception:
             pass
 
+    # Reduce noise: if we already have a real context, detected_raw is redundant
+    if isinstance(result, dict) and result.get("context_raw"):
+        result.pop("detected_raw", None)
+
     return result
 
 @app.post("/train/review")
@@ -257,6 +261,10 @@ def api_train_review(payload: TrainReviewRequest):
 
         except Exception:
             pass
+
+    # Reduce noise: if we already have a real context, detected_raw is redundant
+    if isinstance(result, dict) and result.get("context_raw"):
+        result.pop("detected_raw", None)
 
     return result
 
