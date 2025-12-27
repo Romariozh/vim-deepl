@@ -128,12 +128,28 @@ class TrainerService:
                     item["mode"] = "srs_new"
                     return finalize(item)
 
-            hard = self.repo._list_hard_entries_conn(conn, src_langs, now_ts=now_ts, limit=1, exclude_card_ids=exclude_card_ids)
+            hard_n = int(getattr(self.cfg, "hard_random_top_n", 5))
+            hard = self.repo._list_hard_entries_conn(
+                conn,
+                src_langs,
+                now_ts=now_ts,
+                limit=max(1, hard_n),
+                exclude_card_ids=exclude_card_ids,
+                allow_future=True,
+            )
+            # Удалить после проверки
+            print("DBG hard_cnt=", len(hard), "allow_future=True", flush=True)
+
             if hard:
-                item = hard[0]
+                top = hard[: max(1, min(len(hard), hard_n))]
+                if len(top) == 1:
+                    item = top[0]
+                else:
+                    idx = int(random.triangular(0, len(top) - 1, 0))
+                    item = top[idx]
+
                 item["mode"] = "srs_hard"
                 return finalize(item)
-
         # --- fallback to existing logic (your current implementation) ---
 
         src_filter_u = (src_filter or "").upper()

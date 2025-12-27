@@ -405,6 +405,7 @@ class TrainerRepo:
         now_ts: int,
         limit: int,
         exclude_card_ids: Optional[list[int]] = None,
+        allow_future: bool = False,
     ) -> list[dict[str, Any]]:
         if not src_langs:
             return []
@@ -418,18 +419,23 @@ class TrainerRepo:
             exclude_sql = f" AND c.id NOT IN ({ex_ph}) "
             exclude_args = list(exclude_card_ids)
 
-        sql = f"""
-        SELECT
-            c.id AS card_id,
-            c.entry_id AS entry_id,
-
-            -- Normalize due_at: if it's milliseconds (13+ digits) -> seconds
+        due_expr = """
             CASE
               WHEN CAST(c.due_at AS INTEGER) > 100000000000
               THEN CAST(CAST(c.due_at AS INTEGER) / 1000 AS INTEGER)
               ELSE CAST(c.due_at AS INTEGER)
-            END AS due_at,
+            END
+        """
 
+        due_where = ""
+        if not allow_future:
+            due_where = f" AND ({due_expr}) <= ? "
+
+        sql = f"""
+        SELECT
+            c.id AS card_id,
+            c.entry_id AS entry_id,
+            ({due_expr}) AS due_at,
             c.lapses,
             c.wrong_streak,
 
@@ -461,28 +467,31 @@ class TrainerRepo:
           AND e.ignore = 0
           AND c.due_at IS NOT NULL
           {exclude_sql}
-          AND (
-            CASE
-              WHEN CAST(c.due_at AS INTEGER) > 100000000000
-              THEN CAST(CAST(c.due_at AS INTEGER) / 1000 AS INTEGER)
-              ELSE CAST(c.due_at AS INTEGER)
-            END
-          ) <= ?
+          AND (c.lapses > 0 OR c.wrong_streak > 0)
+          {due_where}
           AND e.src_lang IN ({placeholders})
         ORDER BY
           c.lapses DESC,
           c.wrong_streak DESC,
+          ABS(due_at - ?) ASC,
           due_at ASC,
           COALESCE(CAST(c.last_review_at AS INTEGER), 0) ASC
         LIMIT ?
         """
 
         args: list[Any] = []
-        # Param order: (exclude args...) then now_ts then src_langs then limit
         args.extend(exclude_args)
-        args.append(now_ts)
-        args.extend(src_langs)
-        args.append(limit)
+        # IMPORTANT: bind order must match '?' order in SQL:
+        #   [due_where?] then src_langs (...) then ABS(due_at - now_ts) then LIMIT
+        if not allow_future:
+            args.append(now_ts)   # due_where <= ?
+        args.extend(src_langs)    # e.src_lang IN (..)
+        args.append(now_ts)       # ABS(due_at - ?)
+        args.append(limit)        # LIMIT ?
+
+        # Удалить после проверки
+        print("DBG hard_sql=", sql, flush=True)
+        print("DBG hard_args=", args, flush=True)
 
         rows = conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
