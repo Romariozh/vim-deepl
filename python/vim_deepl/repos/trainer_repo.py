@@ -71,6 +71,21 @@ class TrainerRepo:
                 (now_s, entry_id),
             )
 
+    def touch_last_used(self, entry_id: int, now_s: str) -> None:
+        """
+        Update last_used only (no count increment). Useful for fallback browsing.
+        """
+        with self.db.tx() as conn:
+            ensure_schema(conn)
+            conn.execute(
+                """
+                UPDATE entries
+                SET last_used = ?
+                WHERE id = ?
+                """,
+                (now_s, entry_id),
+            )
+
     def get_training_card(self, card_id: int) -> Optional[Dict[str, Any]]:
         with self.db.tx() as conn:
             ensure_schema(conn)

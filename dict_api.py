@@ -486,7 +486,6 @@ def _mw_attach_grammar(db_path: str, term: str, src_lang: str) -> dict | None:
     conn.row_factory = sqlite3.Row
     try:
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(mw_definitions)")]
-        # найди колонку с raw-json
         raw_col = next((c for c in ["raw_json", "raw", "payload", "data", "json_data"] if c in cols), None)
         if not raw_col:
             return None
@@ -502,34 +501,83 @@ def _mw_attach_grammar(db_path: str, term: str, src_lang: str) -> dict | None:
         if not isinstance(items, list) or not items:
             return None
 
-        # word (лемма) — из meta.id типа "fold:2" => "fold"
-        meta_id = (items[0].get("meta", {}) or {}).get("id", "") or term
-        word = meta_id.split(":")[0] if isinstance(meta_id, str) else term
+        term_l = term.lower()
 
-        # stems
-        stems = (items[0].get("meta", {}) or {}).get("stems", []) or []
-        stems = [s for s in stems if isinstance(s, str)]
-        # part of speech
-        pos = items[0].get("fl", "")
-        pos = pos.capitalize() if isinstance(pos, str) else ""
+        def _base_word(it: dict) -> str:
+            meta_id = ((it.get("meta", {}) or {}).get("id", "") or "")
+            if isinstance(meta_id, str) and meta_id:
+                return meta_id.split(":")[0].strip()
+            return ""
 
-        # shortdef (склеим уникальные)
-        defs = []
+        def _stems(it: dict) -> list[str]:
+            stems = ((it.get("meta", {}) or {}).get("stems", []) or [])
+            return [s for s in stems if isinstance(s, str)]
+
+        # 1) pick lemma/base word
+        lemma = ""
         for it in items:
+            stems = [s.lower() for s in _stems(it)]
+            bw = _base_word(it).lower()
+            if term_l in stems or term_l == bw:
+                lemma = _base_word(it)
+                break
+        if not lemma:
+            lemma = _base_word(items[0]) or term
+
+        lemma_l = lemma.lower()
+
+        # 2) keep only relevant items (same lemma)
+        rel = [it for it in items if _base_word(it).lower() == lemma_l]
+        if not rel:
+            return None
+
+        # 3) stems: best from first relevant item
+        stems = _stems(rel[0])
+
+        # 4) group definitions by POS (fl)
+        pos_map: dict[str, list[str]] = {}
+        for it in rel:
+            fl = it.get("fl", "")
+            if not isinstance(fl, str) or not fl.strip():
+                continue
+            pos = fl.strip().capitalize()
+
             sd = it.get("shortdef") or []
-            if isinstance(sd, list):
-                defs.extend([_mw_clean(x) for x in sd if isinstance(x, str)])
-        # unique preserving order
-        seen = set()
-        shortdef = []
-        for d in defs:
-            if d and d not in seen:
-                seen.add(d)
-                shortdef.append(d)
+            if not isinstance(sd, list):
+                continue
 
-        # etymology: ищем it["et"] -> [["text","..."], ...]
+            for x in sd:
+                if isinstance(x, str):
+                    d = _mw_clean(x)
+                    if d:
+                        pos_map.setdefault(pos, []).append(d)
+
+        # unique defs per pos (preserve order)
+        pos_defs = []
+        for pos, defs in pos_map.items():
+            seen = set()
+            uniq = []
+            for d in defs:
+                if d not in seen:
+                    seen.add(d)
+                    uniq.append(d)
+            pos_defs.append((pos, uniq))
+
+        # stable order: Noun, Verb, Adjective... then others
+        pref = {"Noun": 0, "Verb": 1, "Adjective": 2, "Adverb": 3}
+        pos_defs.sort(key=lambda t: (pref.get(t[0], 99), t[0]))
+
+        # limits
+        MAX_PER_POS = 3
+        pos_blocks = []
+        for pos, defs in pos_defs:
+            shown = defs[:MAX_PER_POS]
+            more = max(0, len(defs) - len(shown))
+            pos_blocks.append({"pos": pos, "defs": shown, "more": more})
+
+        # 5) etymology: first one within relevant items
         ety = ""
-        for it in items:
+        for it in rel:
             et = it.get("et")
             if isinstance(et, list):
                 parts = []
@@ -541,14 +589,13 @@ def _mw_attach_grammar(db_path: str, term: str, src_lang: str) -> dict | None:
                     break
 
         out = {
-            "word": word,
+            "word": lemma,
             "stems": stems,
-            "shortdef": shortdef[:6],          # чтобы не раздувать UI
-            "part_of_speech": pos,
+            "pos_blocks": pos_blocks,  # <-- NEW
             "etymology": ety,
         }
-        # если совсем пусто — не показываем
-        if not (out["stems"] or out["shortdef"] or out["part_of_speech"] or out["etymology"]):
+
+        if not (out["stems"] or out["pos_blocks"] or out["etymology"]):
             return None
         return out
     finally:

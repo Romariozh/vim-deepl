@@ -193,19 +193,7 @@ class TranslationRepo:
                     return json.loads(x)
                 except Exception:
                     return x
-            """
-            return {
-                "term": row["term"],
-                "src_lang": row["src_lang"],
-                "noun": _loads(row["defs_noun"]),
-                "verb": _loads(row["defs_verb"]),
-                "adj": _loads(row["defs_adj"]),
-                "adv": _loads(row["defs_adv"]),
-                "other": _loads(row["defs_other"]),
-                "raw_json": row["raw_json"],
-                "created_at": row["created_at"],
-            }
-            """
+
             return {
                 "noun": _loads(row["defs_noun"]),
                 "verb": _loads(row["defs_verb"]),
@@ -218,6 +206,15 @@ class TranslationRepo:
 
 
     def upsert_mw_definitions(self, term: str, src_lang: str, defs: dict, now_s: str) -> None:
+        """
+        Store MW definitions into SQLite.
+
+        Notes:
+        - POS columns remain JSON-encoded lists for backward compatibility.
+        - raw_json is stored as-is (string). It can be either:
+            * original MW response JSON (list)
+            * our parsed v2 object JSON (dict)
+        """
         def _dumps(x: Any) -> Optional[str]:
             if x is None:
                 return None

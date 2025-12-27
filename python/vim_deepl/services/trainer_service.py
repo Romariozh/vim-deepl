@@ -142,12 +142,34 @@ class TrainerService:
         else:
             src_langs = ["EN", "DA"]
 
+        # Map exclude_card_ids -> exclude_entry_ids for fallback picker
+        exclude_entry_ids: set[int] = set()
+        if exclude_card_ids:
+            with self.repo.db.tx() as conn:
+                ensure_schema(conn)
+                conn.row_factory = sqlite3.Row
+                ph = ",".join(["?"] * len(exclude_card_ids))
+                sql = f"SELECT entry_id FROM training_cards WHERE id IN ({ph})"
+                for r in conn.execute(sql, list(exclude_card_ids)).fetchall():
+                    exclude_entry_ids.add(int(r["entry_id"]))
+
         rows = self.repo.list_entries_for_training(src_langs)
         if not rows:
             return {"type": "train", "error": f"No entries for filter={src_filter_u or 'ALL'}"}
 
+         # If the client excluded everything in this session, ignore exclusions (backend-side reset).
+        ignore_exclusions = False
+        if exclude_entry_ids and len(exclude_entry_ids) >= len(rows):
+            exclude_entry_ids.clear()
+            ignore_exclusions = True
+
         entries: List[Dict[str, Any]] = []
         for row in rows:
+            # IMPORTANT: normalize the real entries.id (some queries may return joined "id")
+            row_entry_id = int(row.get("entry_id") or row["id"])
+            if row_entry_id in exclude_entry_ids:
+                continue
+
             last_str = row.get("last_used") or row.get("created_at") or "1970-01-01 00:00:00"
             date_dt = parse_dt(row["created_at"])
             last_dt = parse_dt(last_str)
@@ -157,7 +179,8 @@ class TrainerService:
 
             entries.append(
                 {
-                    "id": row["id"],
+                    "entry_id": row_entry_id,
+                    "id": row["id"],  # keep for debugging/back-compat
                     "src": row["src_lang"],
                     "word": row["term"],
                     "translation": row["translation"],
@@ -168,6 +191,36 @@ class TrainerService:
                     "bucket": bucket,
                 }
             )
+
+        # ---- FALLBACK SAFETY: if we excluded everything in this session, ignore exclusions ----
+        if not entries:
+            exclude_entry_ids.clear()
+            for row in rows:
+                row_entry_id = int(row.get("entry_id") or row["id"])
+
+                last_str = row.get("last_used") or row.get("created_at") or "1970-01-01 00:00:00"
+                date_dt = parse_dt(row["created_at"])
+                last_dt = parse_dt(last_str)
+
+                age_days = (now.date() - date_dt.date()).days
+                bucket = "recent" if age_days <= self.cfg.recent_days else "old"
+
+                entries.append(
+                    {
+                        "entry_id": row_entry_id,
+                        "id": row["id"],
+                        "src": row["src_lang"],
+                        "word": row["term"],
+                        "translation": row["translation"],
+                        "target_lang": row["dst_lang"],
+                        "count": row["count"],
+                        "hard": row["hard"],
+                        "last": last_dt,
+                        "bucket": bucket,
+                    }
+                )
+
+        # ------------------------------------------------------------------------------
 
         total = len(entries)
         mastered = sum(1 for e in entries if e["count"] >= self.cfg.mastery_count)
@@ -188,32 +241,64 @@ class TrainerService:
             pool = not_mastered
 
         for it in pool:
-            last_dt = parse_dt(it["last_used"]) if it.get("last_used") else None
-            if last_dt and last_dt.tzinfo is None:
-                last_dt = last_dt.replace(tzinfo=timezone.utc)
-            it["last_ts"] = int(last_dt.timestamp()) if last_dt else 0
+            last_dt = it.get("last")
+            if isinstance(last_dt, datetime):
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                it["last_ts"] = int(last_dt.timestamp())
+            else:
+                it["last_ts"] = 0
 
         pool.sort(key=lambda e: (e["count"], -e["hard"], e["last_ts"]))
-        chosen = pool[0]
 
-        self.repo.touch_usage(chosen["id"], now_s)
+        # Randomize inside the "best" slice to avoid repeating the same deterministic order.
+        if len(pool) == 1:
+            chosen = pool[0]
+        else:
+            mode = max(0, int(len(pool) * 0.2))
+            idx = int(random.triangular(0, len(pool) - 1, mode))
+            chosen = pool[idx]
+
+        # If we had to ignore exclusions (exclude covered everything), try not to return the last-excluded card again.
+        if ignore_exclusions and exclude_card_ids and len(pool) > 1:
+            try:
+                last_cid = int(exclude_card_ids[-1])
+                with self.repo.db.tx() as conn:
+                    ensure_schema(conn)
+                    conn.row_factory = sqlite3.Row
+                    r = conn.execute("SELECT entry_id FROM training_cards WHERE id=?", (last_cid,)).fetchone()
+                last_eid = int(r["entry_id"]) if r else None
+            except Exception:
+                last_eid = None
+
+            if last_eid is not None:
+                # re-roll a few times to avoid immediate repeat
+                for _ in range(5):
+                    if int(chosen.get("entry_id") or chosen.get("id") or 0) != last_eid:
+                        break
+                    idx = int(random.triangular(0, len(pool) - 1, 0))
+                    chosen = pool[idx]
+
+        # IMPORTANT: fallback browsing (key 'n' / skip) must NOT change count/last_used.
+        # Count should increase only when the user grades a card (review 0..5).
 
         # ensure card exists so UI/review can work uniformly
         with self.repo.db.tx() as conn:
             ensure_schema(conn)
             conn.row_factory = sqlite3.Row
-            card_id = self.repo._ensure_card_for_entry_conn(conn, chosen["id"], now_ts)
+            chosen_entry_id = int(chosen.get("entry_id") or chosen["id"])
+            card_id = self.repo._ensure_card_for_entry_conn(conn, chosen_entry_id, now_ts)
 
         item = {
             "mode": "fallback",
             "card_id": card_id,
-            "entry_id": chosen["id"],
+            "entry_id": chosen_entry_id,
             "term": chosen["word"],
             "translation": chosen["translation"],
             "src_lang": chosen["src"],
             "dst_lang": chosen["target_lang"],
             "timestamp": now_s,
-            "count": chosen["count"] + 1,
+            "count": chosen["count"],
             "hard": chosen["hard"],
             "stats": {
                 "total": total,
@@ -222,6 +307,7 @@ class TrainerService:
                 "mastery_percent": mastery_percent,
             },
         }
+
         return finalize(item)
 
     def review_training_card(self, card_id: int, grade: int, now: datetime) -> Dict[str, Any]:
@@ -245,6 +331,20 @@ class TrainerService:
 
             self.repo._insert_training_review_conn(conn, card_id, now_ts, grade, day)
             self.repo._update_training_card_srs_conn(conn, card_id, srs)
+
+            # Count only graded answers (0-5). Views/fallback must NOT call this block.
+            now_s = now.strftime("%Y-%m-%d %H:%M:%S")
+            entry_id = int(card.get("entry_id") or 0)
+            if entry_id:
+                conn.execute(
+                    """
+                    UPDATE entries
+                    SET last_used = ?,
+                        count = count + 1
+                    WHERE id = ?
+                    """,
+                    (now_s, entry_id),
+                )
 
             return srs
 
