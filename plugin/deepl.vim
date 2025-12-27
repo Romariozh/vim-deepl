@@ -49,6 +49,10 @@ function! s:deepl_apply_log_highlights() abort
 
   call matchadd('DeeplTRN', '^TRN:.*$')
 endfunction
+
+" Green background label for 'all done'
+highlight default DeeplTrainerAllDone ctermfg=0 ctermbg=2 guifg=#000000 guibg=#00aa00
+
 " === Key mappings ===
 " Normal: translate word under cursor
 nnoremap <silent> <F2>  :call deepl#translate_word()<CR>

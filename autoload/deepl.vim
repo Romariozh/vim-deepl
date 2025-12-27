@@ -296,8 +296,6 @@ function! DeepLTrainerRender(show_translation) abort
 
   let l:mode_suffix = empty(l:mode_label) ? '' : (' [' . l:mode_label . ']')
 
-  "let l:mode_suffix = empty(l:mode) ? '' : (' [' . l:mode . ']')
-  
   " Determine width (prefer actual window width if visible)
   let l:winid = bufwinid(g:deepl_trainer_bufnr)
   let l:width = (l:winid != -1) ? winwidth(l:winid) : &columns
@@ -322,7 +320,7 @@ function! DeepLTrainerRender(show_translation) abort
 
   " Header (no legacy Count/Hard)
   call add(l:lines, printf(
-        \ ' :Trainer: (%s -> %s)%s Reviewed: %d Run: %dd',
+        \ ' :Trainer: (%s -> %s)%s Reviewed: %d Run: %dd  ᚨᚲᛚ',
         \ l:filter, l:lang, l:mode_suffix, l:today_done, l:streak_days))
   
   " SRS details line (replaces old Count/Hard line)
@@ -365,22 +363,16 @@ function! DeepLTrainerRender(show_translation) abort
   if type(l:g) == v:t_dict && !empty(l:g)
     call add(l:lines, 'GRAMMAR:')
 
-    let l:gw  = get(l:g, 'word', '')
-    let l:pos = get(l:g, 'pos', get(l:g, 'fl', get(l:g, 'part_of_speech', '')))
-
-    if !empty(l:gw) || !empty(l:pos)
-      let l:line = '  Word: ' . l:gw
-      if !empty(l:pos)
-        let l:line .= '   Part of Speech: ' . l:pos
-      endif
-      call add(l:lines, l:line)
+    let l:gw = get(l:g, 'word', '')
+    if !empty(l:gw)
+      call add(l:lines, '  Word: ' . l:gw)
     endif
 
+    " Stems (как у тебя уже хорошо сделано)
     let l:stems = get(l:g, 'stems', [])
     if type(l:stems) == v:t_list && !empty(l:stems)
       let l:st = 'Stems: ' . join(l:stems, ', ')
-      let l:wrapped = s:deepl_wrap(l:st, l:width - 4, 2)  " -4 чтобы учесть будущий отступ
-
+      let l:wrapped = s:deepl_wrap(l:st, l:width - 4, 2)
       if !empty(l:wrapped)
         call add(l:lines, '  ' . l:wrapped[0])
         if len(l:wrapped) > 1
@@ -389,28 +381,40 @@ function! DeepLTrainerRender(show_translation) abort
       endif
     endif
 
-    let l:defs = get(l:g, 'shortdef', [])
-    if type(l:defs) == v:t_list && !empty(l:defs)
-      call add(l:lines, '  Basic definitions:')
-      for l:d in l:defs
-        " wrap each definition nicely
-        let l:wrapped = s:deepl_wrap('- ' . l:d, l:width - 4, 3)
-        if !empty(l:wrapped)
-          call add(l:lines, '    ' . l:wrapped[0])
-          if len(l:wrapped) > 1 | call add(l:lines, '    ' . l:wrapped[1]) | endif
-          if len(l:wrapped) > 2 | call add(l:lines, '    ' . l:wrapped[2]) | endif
+    " POS blocks
+    let l:pbs = get(l:g, 'pos_blocks', [])
+    if type(l:pbs) == v:t_list && !empty(l:pbs)
+      for l:b in l:pbs
+        let l:pos = get(l:b, 'pos', '')
+        if empty(l:pos) | continue | endif
+        call add(l:lines, '  ' . l:pos . ':')
+
+        let l:defs = get(l:b, 'defs', [])
+        if type(l:defs) == v:t_list
+          for l:d in l:defs
+            let l:wrapped = s:deepl_wrap('- ' . l:d, l:width - 6, 3)
+            if !empty(l:wrapped)
+              call add(l:lines, '    ' . l:wrapped[0])
+              if len(l:wrapped) > 1 | call add(l:lines, '    ' . l:wrapped[1]) | endif
+              if len(l:wrapped) > 2 | call add(l:lines, '    ' . l:wrapped[2]) | endif
+            endif
+          endfor
+        endif
+
+        let l:more = get(l:b, 'more', 0)
+        if l:more > 0
+          call add(l:lines, printf('    … (+%d more)', l:more))
         endif
       endfor
     endif
-    
+
     " Add etymology at the end if exists
     let l:ety = get(l:g, 'etymology', '')
     if !empty(l:ety)
-      let l:wrapped = s:deepl_wrap(l:ety, l:width - 4, 3)
-      if !empty(l:wrapped)
-        call add(l:lines, '  ' . l:wrapped[0])
-        if len(l:wrapped) > 1 | call add(l:lines, '  ' . l:wrapped[1]) | endif
-        if len(l:wrapped) > 2 | call add(l:lines, '  ' . l:wrapped[2]) | endif
+      " Full line width = l:width (мы уже считаем префикс внутри)
+      let l:ety_lines = s:deepl_wrap_pref(l:ety, '  Etymology: ', l:width, 3)
+      if !empty(l:ety_lines)
+        call extend(l:lines, l:ety_lines)
       endif
     endif
 
@@ -433,6 +437,13 @@ function! DeepLTrainerRender(show_translation) abort
 
   call setbufline(g:deepl_trainer_bufnr, 1, l:lines)
 
+  " Highlight [all done] in header when fallback
+  if l:mode ==# 'fallback'
+    call deepl#trainer#apply_mode_hl(g:deepl_trainer_bufnr, 1, 'all done')
+  else
+    call deepl#trainer#apply_mode_hl(g:deepl_trainer_bufnr, 1, '')
+  endif
+
   let l:new_len = len(l:lines)
   let l:old_len = len(getbufline(g:deepl_trainer_bufnr, 1, '$'))
   if l:old_len > l:new_len
@@ -443,7 +454,7 @@ function! DeepLTrainerRender(show_translation) abort
   if l:winid != -1
     call win_execute(
           \ l:winid,
-          \ 'call deepl#trainer_apply_hl('
+          \ 'call deepl#trainer#apply_hl('
           \ . g:deepl_trainer_bufnr . ', '
           \ . string(l:word) . ', '
           \ . string(l:tr) . ', '
@@ -520,6 +531,64 @@ function! s:deepl_wrap(text, width, max_lines) abort
 
   return l:out
 endfunction
+" -------------------------------------------------------
+" Wrap text with a prefix on the first line and aligned continuation lines.
+" Example:
+"   prefix="  Etymology: "
+"   next lines will start with spaces of same display width (align under 'E')
+function! s:deepl_wrap_pref(text, prefix, width, max_lines) abort
+  let l:t = s:deepl_one_line(a:text)
+  if empty(l:t) || a:width <= 10
+    return []
+  endif
+
+  let l:pref   = a:prefix
+  let l:indent = repeat(' ', strdisplaywidth(l:pref))
+
+  " Available widths for content (first line vs continuation lines)
+  let l:w1 = a:width - strdisplaywidth(l:pref)
+  let l:wN = a:width - strdisplaywidth(l:indent)
+  let l:w1 = max([10, l:w1])
+  let l:wN = max([10, l:wN])
+
+  let l:words = split(l:t, ' ')
+  let l:out = []
+  let l:cur = ''
+  let l:line_no = 0
+
+  for l:w in l:words
+    let l:lim = (l:line_no == 0 ? l:w1 : l:wN)
+
+    if empty(l:cur)
+      let l:cur = l:w
+    elseif strdisplaywidth(l:cur . ' ' . l:w) <= l:lim
+      let l:cur .= ' ' . l:w
+    else
+      call add(l:out, (l:line_no == 0 ? l:pref : l:indent) . l:cur)
+      let l:line_no += 1
+
+      " If we reached limit, add ellipsis to the last visible line
+      if len(l:out) >= a:max_lines
+        let l:last = l:out[-1]
+        " Ensure ellipsis fits into width
+        while strdisplaywidth(l:last . '…') > a:width && strchars(l:last) > 0
+          let l:last = strcharpart(l:last, 0, strchars(l:last) - 1)
+        endwhile
+        let l:out[-1] = l:last . '…'
+        return l:out
+      endif
+
+      let l:cur = l:w
+    endif
+  endfor
+
+  if !empty(l:cur) && len(l:out) < a:max_lines
+    call add(l:out, (l:line_no == 0 ? l:pref : l:indent) . l:cur)
+  endif
+
+  return l:out
+endfunction
+
 " -------------------------------------------------------
 " Clear previous highlight matches in the trainer window (buffer-local target).
 function! s:deepl_trainer_hl_clear(bufnr) abort
@@ -643,98 +712,6 @@ function! s:deepl_trainer_apply_hl(bufnr, word, tr, show_translation) abort
   
   " Save ids so we can clear them next render
   call setwinvar(l:winid, 'deepl_trainer_match_ids', l:ids)
-endfunction
-" -------------------------------------------------------
-function! deepl#trainer_apply_hl(bufnr, word, tr, show) abort
-  " Must run in trainer window context (call via win_execute()).
-  if a:bufnr <= 0
-    return
-  endif
-
-  " Ensure highlight groups exist (colorscheme may reset them)
-  if !hlexists('DeepLTrainerUnitWord')
-    highlight default DeepLTrainerUnitWord cterm=bold ctermfg=121 gui=bold
-  endif
-  if !hlexists('DeepLTrainerTranslationWord')
-    highlight default DeepLTrainerTranslationWord cterm=bold ctermfg=221 gui=bold
-  endif
-  if !hlexists('DeepLTrainerModeHard')
-    highlight default DeepLTrainerModeHard cterm=bold ctermfg=94 gui=bold
-  endif
-  if !hlexists('DeepLTrainerContextWord')
-    highlight default DeepLTrainerContextWord ctermfg=121 gui=NONE cterm=NONE
-  endif
-
-  if bufnr('%') != a:bufnr
-    execute 'silent! buffer ' . a:bufnr
-  endif
-
-  " Clear previous window-local matches
-  if exists('w:deepl_trainer_match_ids')
-    for l:id in w:deepl_trainer_match_ids
-      silent! call matchdelete(l:id)
-    endfor
-  endif
-  let w:deepl_trainer_match_ids = []
-
-  " Highlight UNIT value
-  let l:ln = search('^UNIT:\s*', 'nW')
-  if l:ln > 0 && !empty(a:word)
-    let l:line = getline(l:ln)
-    let l:col0 = matchend(l:line, '^UNIT:\s*') + 1
-    if l:col0 > 0
-      call add(w:deepl_trainer_match_ids,
-            \ matchaddpos('DeepLTrainerUnitWord', [[l:ln, l:col0, strlen(a:word)]]))
-    endif
-  endif
-
-  " Highlight TRN value (only when shown)
-  if a:show
-    let l:ln = search('TRN:\s*', 'nW')
-    if l:ln > 0 && !empty(a:tr)
-      let l:line = getline(l:ln)
-      let l:col0 = matchend(l:line, 'TRN:\s*') + 1
-      if l:col0 > 0
-        call add(w:deepl_trainer_match_ids,
-              \ matchaddpos('DeepLTrainerTranslationWord', [[l:ln, l:col0, strlen(a:tr)]]))
-      endif
-    endif
-  endif
-
-  " Highlight word occurrences in CTX lines (word only)
-  if !empty(a:word)
-    let l:positions = []
-    let l:needle = '\<' . escape(a:word, '\.^$~[]') . '\>'
-
-    " Find CTX line, then also process continuation lines (6 leading spaces)
-    let l:ln = search('^CTX:\s*', 'nW')
-    while l:ln > 0
-      let l:line = getline(l:ln)
-
-      if l:line =~# '^CTX:\s*' || l:line =~# '^\s\{6}'
-        let l:start = 0
-        while 1
-          let l:m = matchstrpos(l:line, l:needle, l:start)
-          if empty(l:m) || l:m[1] < 0
-            break
-          endif
-          call add(l:positions, [l:ln, l:m[1] + 1, strlen(l:m[0])])
-          let l:start = l:m[2]
-        endwhile
-        let l:ln += 1
-        continue
-      endif
-
-      break
-    endwhile
-
-    if !empty(l:positions)
-      call add(w:deepl_trainer_match_ids, matchaddpos('DeepLTrainerContextWord', l:positions))
-    endif
-  endif
-
-  " Highlight Hard:1 in header if present
-  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerModeHard', 'Hard:\s*1'))
 endfunction
 " -------------------------------------------------------
 function! deepl#translation_apply_hl(bufnr) abort
@@ -1501,27 +1478,92 @@ function! deepl#show_defs() abort
 
   let l:header_line = l:left . repeat(' ', l:space) . l:src_tag
 
-  " Build popup lines
+  " Build popup lines (context + header + word info + POS sections).
   let l:mw = l:resp.mw_definitions
-  let l:lines = [l:header_line, '']
+  let l:lines = []
 
-  let l:sections = ['verb', 'noun', 'adjective', 'adverb', 'other']
+  " Keep the original right-aligned header line (word → translation + SRC/CTX tag).
+  call add(l:lines, l:header_line)
+  call add(l:lines, '')
+
+  " Show structured word info if provided by backend (parsed MW v2).
+  let l:status = get(l:mw, 'status', '')
+  let l:info = get(l:mw, 'info', {})
+
+  if type(l:info) == v:t_dict && !empty(l:info)
+    let l:hw   = get(l:info, 'headword', '')
+    let l:pron = get(l:info, 'pronunciation', '')
+    let l:pos  = get(l:info, 'main_pos', '')
+    let l:stems = get(l:info, 'stems', [])
+    let l:has_audio = get(l:info, 'has_audio', v:false)
+
+    if type(l:hw) == v:t_string && !empty(l:hw)
+      call add(l:lines, 'HW: ' . l:hw)
+    endif
+    if type(l:pron) == v:t_string && !empty(l:pron)
+      call add(l:lines, 'PRON: ' . l:pron)
+    endif
+    if type(l:pos) == v:t_string && !empty(l:pos)
+      call add(l:lines, 'POS: ' . l:pos)
+    endif
+
+    if type(l:stems) == v:t_list && !empty(l:stems)
+      " Limit stems to keep popup readable.
+      call add(l:lines, 'STEMS: ' . join(l:stems[:15], ', '))
+    endif
+
+    call add(l:lines, 'AUDIO: ' . (l:has_audio ? 'yes (F2)' : 'no'))
+    call add(l:lines, '')
+  endif
+
+  " Suggestions mode (MW returned a list of strings).
+  if l:status ==# 'suggestions'
+    let l:sugg = get(l:mw, 'suggestions', [])
+    if type(l:sugg) == v:t_list && len(l:sugg) > 0
+      call add(l:lines, 'SUGGESTIONS:')
+      for l:s in l:sugg
+        if type(l:s) == v:t_string && !empty(l:s)
+          call add(l:lines, '• ' . l:s)
+        endif
+      endfor
+    else
+      call add(l:lines, '(no suggestions)')
+    endif
+
+    call s:deepl_show_defs_buffer(l:lines, '-  MW  -')
+    return
+  endif
+
+  " Definitions sections in stable order.
+  let l:sections = ['noun', 'verb', 'adjective', 'adverb', 'other']
+  let l:defs_count = 0
+
   for l:sec in l:sections
     let l:defs = get(l:mw, l:sec, [])
-    if type(l:defs) == type([]) && len(l:defs) > 0
+    if type(l:defs) == v:t_list && len(l:defs) > 0
+      let l:defs_count += len(l:defs)
       call add(l:lines, toupper(l:sec) . ':')
       for l:d in l:defs
-        call add(l:lines, '• ' . l:d)
+        if type(l:d) == v:t_string && !empty(l:d)
+          call add(l:lines, '• ' . l:d)
+        endif
       endfor
       call add(l:lines, '')
     endif
   endfor
 
-  if len(l:lines) <= 2
+  " If nothing was printed besides header/context, show a fallback message.
+  if l:defs_count == 0
     call add(l:lines, '(no MW definitions)')
   endif
 
+  " Trim trailing blank lines.
+  while len(l:lines) > 0 && l:lines[-1] ==# ''
+    call remove(l:lines, -1)
+  endwhile
+
   call s:deepl_show_defs_buffer(l:lines, '-  MW  -')
+
 endfunction
 
 function! deepl#debug_sentence_context() abort
@@ -1574,6 +1616,101 @@ function! s:deepl_show_defs_buffer(lines, title) abort
   setlocal nomodifiable
   execute 'file [MW] '.a:title
 endfunction
+" -------------------------------------------------------
+" Build a structured MW popup layout (context + header + POS sections).
+function! s:deepl_build_mw_popup_lines(term, translation, ctx_text, mw) abort
+  " All comments in this function are in English (as requested).
+
+  let l:lines = []
+
+  " 1) Context (shown first)
+  if type(a:ctx_text) == v:t_string && !empty(a:ctx_text)
+    call add(l:lines, 'CTX: ' . a:ctx_text)
+    call add(l:lines, '')
+  endif
+
+  " 2) Main title line (word -> translation)
+  if type(a:translation) == v:t_string && !empty(a:translation)
+    call add(l:lines, a:term . ' -> ' . a:translation)
+  else
+    call add(l:lines, a:term)
+  endif
+
+  " 3) Header info from parsed MW (optional)
+  let l:info = get(a:mw, 'info', {})
+  if type(l:info) == v:t_dict && !empty(l:info)
+    let l:hw   = get(l:info, 'headword', '')
+    let l:pron = get(l:info, 'pronunciation', '')
+    let l:pos  = get(l:info, 'main_pos', '')
+    let l:stems = get(l:info, 'stems', [])
+    let l:has_audio = get(l:info, 'has_audio', v:false)
+
+    if !empty(l:hw)   | call add(l:lines, 'HW: ' . l:hw) | endif
+    if !empty(l:pron) | call add(l:lines, 'PRON: ' . l:pron) | endif
+    if !empty(l:pos)  | call add(l:lines, 'POS: ' . l:pos) | endif
+
+    if type(l:stems) == v:t_list && !empty(l:stems)
+      " Show stems compactly; popup wrapping is enabled anyway.
+      call add(l:lines, 'STEMS: ' . join(l:stems[:15], ', '))
+    endif
+
+    call add(l:lines, 'AUDIO: ' . (l:has_audio ? 'yes (F2)' : 'no'))
+    call add(l:lines, '')
+  endif
+
+  " 4) Suggestions mode (MW returned a list of strings)
+  if get(a:mw, 'status', '') ==# 'suggestions'
+    let l:sugg = get(a:mw, 'suggestions', [])
+    if type(l:sugg) == v:t_list && !empty(l:sugg)
+      call add(l:lines, 'SUGGESTIONS:')
+      for s in l:sugg
+        if type(s) == v:t_string && !empty(s)
+          call add(l:lines, '  • ' . s)
+        endif
+      endfor
+    else
+      call add(l:lines, '(no suggestions)')
+    endif
+    return l:lines
+  endif
+
+  " 5) Definitions by part of speech (stable order)
+  let l:order = [
+        \ ['noun', 'NOUN'],
+        \ ['verb', 'VERB'],
+        \ ['adjective', 'ADJECTIVE'],
+        \ ['adverb', 'ADVERB'],
+        \ ['other', 'OTHER'],
+        \ ]
+
+  let l:any_defs = 0
+
+  for [l:key, l:label] in l:order
+    let l:defs = get(a:mw, l:key, [])
+    if type(l:defs) == v:t_list && !empty(l:defs)
+      let l:any_defs = 1
+      call add(l:lines, l:label . ':')
+      for d in l:defs
+        if type(d) == v:t_string && !empty(d)
+          call add(l:lines, '  • ' . d)
+        endif
+      endfor
+      call add(l:lines, '')
+    endif
+  endfor
+
+  if !l:any_defs
+    call add(l:lines, '(no MW definitions)')
+  endif
+
+  " Trim trailing blank lines
+  while !empty(l:lines) && l:lines[-1] ==# ''
+    call remove(l:lines, -1)
+  endwhile
+
+  return l:lines
+endfunction
+
 " -------------------------------------------------------
 function! s:deepl_defs_popup_apply_hl(popup_id) abort
   let l:winid = a:popup_id

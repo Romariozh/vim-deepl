@@ -5,3 +5,12 @@ function! deepl#hl#apply_trainer() abort
   highlight default DeepLTrainerContextWord      ctermfg=121 gui=NONE cterm=NONE
 endfunction
 
+" Grammar block highlights
+hi def link DeepLTrainerGrammarTitle       Title
+hi def link DeepLTrainerGrammarKey         Identifier
+hi def link DeepLTrainerGrammarPos         Type
+hi def link DeepLTrainerGrammarBullet      Special
+hi def link DeepLTrainerGrammarMore        Comment
+hi def link DeepLTrainerGrammarEtymology   Comment
+
+
