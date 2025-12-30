@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 from vim_deepl.utils.logging import get_logger
+from typing import Dict
 
 log = get_logger("repos.schema")
 
@@ -78,6 +79,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         ON mw_definitions(term, src_lang)
         """
     )
+
+    # --- MW audio metadata (no manual migrations) ---
+    # audio_main: selected primary audio_id for the term
+    # audio_ids: JSON list of audio_ids (built from the main MW entry only)
+    ensure_columns(conn, "mw_definitions", {
+        "audio_main": "TEXT",
+        "audio_ids":  "TEXT",
+    })
 
     conn.execute(
          """

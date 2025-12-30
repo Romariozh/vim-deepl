@@ -5,12 +5,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
+import json
+import re
 
 from vim_deepl.repos.translation_repo import TranslationRepo
+from vim_deepl.integrations.mw_parse import extract_audio_main_and_ids
+from vim_deepl.services.mw_audio_service import prefetch_mw_audio_in_background
+
 
 # deepl_call(text, target_lang, context="") -> (translation, detected_src, err_string_or_None)
 DeeplCall = Callable[[str, str], Tuple[str, str, Optional[str]]]
 
+_RE_LATIN_WORD = re.compile(r"^[A-Za-z][A-Za-z'\-]*$")
 
 @dataclass(frozen=True)
 class TranslationDeps:
@@ -23,6 +29,24 @@ class TranslationDeps:
     ctx_hash: Callable[[str], str]
     mw_fetch: Optional[Callable[[str, str], Optional[dict]]] = None  # (term, src_lang) -> defs dict
 
+def _mw_src_lang(term: str, src_hint: str | None, detected_lang: str | None) -> str:
+    """
+    Decide source language for MW lookup.
+    Priority:
+      1) explicit src_hint from Vim (F3 cycle)
+      2) detected_lang (if you have it)
+      3) fallback heuristic: latin word -> EN
+    """
+    if src_hint:
+        return src_hint.upper()
+
+    if detected_lang:
+        return detected_lang.upper()
+
+    if term and _RE_LATIN_WORD.match(term):
+        return "EN"
+
+    return ""
 
 @dataclass(frozen=True)
 class TranslationService:
@@ -30,26 +54,58 @@ class TranslationService:
     deps: TranslationDeps
 
     def _ensure_mw_definitions(self, term: str, src_lang: str, now_s: str) -> Optional[dict]:
-        if src_lang != "EN":
+        src_u = (src_lang or "").upper().strip()
+        if src_u != "EN":
             return None
 
-        cached = self.repo.get_mw_definitions(term, src_lang)
+        # IMPORTANT: use normalized src_u everywhere below
+        cached = self.repo.get_mw_definitions(term, src_u)
         if cached is not None:
+            # Backfill audio_main/audio_ids for old rows (no MW refetch).
+            # Only do it if raw_json looks like MW list[dict].
+            try:
+                if isinstance(cached, dict) and not cached.get("audio_ids"):
+                    raw = cached.get("raw_json")
+                    if isinstance(raw, str) and raw:
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                            audio_main, audio_ids = extract_audio_main_and_ids(parsed, term)
+                            if audio_main or audio_ids:
+                                patched = dict(cached)
+                                patched["audio_main"] = audio_main
+                                patched["audio_ids"] = audio_ids
+                                # Upsert will update audio_main/audio_ids columns.
+                                self.repo.upsert_mw_definitions(term, src_u, patched, now_s)
+                                cached = self.repo.get_mw_definitions(term, src_u)
+            except Exception:
+                # Backfill is best-effort.
+                pass
+
+            # Prefetch audio in background (best-effort).
+            if isinstance(cached, dict):
+                prefetch_mw_audio_in_background(cached.get("audio_main"))
             return cached
 
         if self.deps.mw_fetch is None:
             return None
 
         try:
-            defs = self.deps.mw_fetch(term, src_lang)
-        except Exception:
+            defs = self.deps.mw_fetch(term, src_u)
+        except Exception as e:
+            # Do not swallow MW errors silently; helps debugging systemd/env issues.
+            print(f"[mw] fetch failed for term={term} src_lang={src_u}: {e}", flush=True)
             return None
 
         if not defs:
             return None
 
-        self.repo.upsert_mw_definitions(term, src_lang, defs, now_s)
-        return self.repo.get_mw_definitions(term, src_lang)
+        self.repo.upsert_mw_definitions(term, src_u, defs, now_s)
+
+        # Prefetch audio in background (best-effort).
+        if isinstance(defs, dict):
+            prefetch_mw_audio_in_background(defs.get("audio_main"))
+
+        return self.repo.get_mw_definitions(term, src_u)
 
     def translate_word(
         self,
@@ -71,6 +127,7 @@ class TranslationService:
         # 1) CONTEXT MODE (separate cache: entries_ctx)
         if ctx:
             src_expected = (src_hint or "").upper() or "EN"
+            src_for_mw = _mw_src_lang(word, src_hint, src_expected)  # detected_lang unknown here; use src_expected
             h = self.deps.ctx_hash(ctx)
 
             cached = self.repo.get_ctx_entry(word, src_expected, target_lang, h)
@@ -79,7 +136,7 @@ class TranslationService:
                 if self.repo.get_base_entry_any_src(word, target_lang) is None:
                     self.repo.upsert_base_entry(word, cached["translation"], cached["src_lang"], target_lang, "", now_s, context=context)
 
-                mw_defs = self._ensure_mw_definitions(word, cached["src_lang"], now_s)
+                mw_defs = self._ensure_mw_definitions(word, src_for_mw, now_s)
 
                 return {
                     "type": "word",
@@ -143,11 +200,13 @@ class TranslationService:
             }
 
         # 2) BASE MODE (original cache: entries)
-        row = self.repo.get_base_entry_any_src(word, target_lang)
+        row = self.repo.get_base_entry_any_src(word, target_lang, src_hint)
         if row is not None:
             self.repo.touch_base_usage(row["id"], now_s)
 
-            mw_defs = self._ensure_mw_definitions(word, row["src_lang"], now_s)
+            src_for_mw = _mw_src_lang(word, src_hint, row["src_lang"])
+            mw_defs = self._ensure_mw_definitions(word, src_for_mw, now_s)
+
 
             return {
                 "type": "word",

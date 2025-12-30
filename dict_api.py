@@ -22,8 +22,10 @@ from vim_deepl.repos.sqlite_repo import SQLiteRepo
 from vim_deepl.repos.schema import ensure_schema
 from vim_deepl.repos.translation_repo import TranslationRepo
 from vim_deepl.services.trainer_service import TrainerConfig
+from vim_deepl.api.routes.mw_audio import router as mw_audio_router
 
 app = FastAPI(title="Local Dict API")
+app.include_router(mw_audio_router)
 
 DICT_BASE = os.path.expanduser("~/.local/share/vim-deepl")
 _MW_TAG_RE = re.compile(r"\{[^}]+\}")  # strips {it} {/it} {bc} {ldquo} {sx|...} etc.
@@ -85,8 +87,6 @@ class TrainReviewReq(BaseModel):
 class TrainNextRequest(BaseModel):
     src_filter: str | None = None
     exclude_card_ids: list[int] = Field(default_factory=list)
-
-app = FastAPI(title="Local Dict API")
 
 
 @app.get("/entries")

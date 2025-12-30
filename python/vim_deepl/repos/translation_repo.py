@@ -31,15 +31,42 @@ class TranslationRepo:
     # -------------------------
     # Base cache: entries
     # -------------------------
-    def get_base_entry_any_src(self, term: str, dst_lang: str) -> Optional[dict]:
+    def get_base_entry_any_src(self, term: str, dst_lang: str, src_hint: str | None = None) -> Optional[dict]:
+        """
+        Return the best cached base entry for (term, dst_lang).
+
+        If src_hint is provided (e.g. from Vim F3 cycle), try that src_lang first.
+        If not found, fall back to any src_lang.
+        """
         with self.db.read() as conn:
             ensure_schema(conn)
+
+            # 1) Prefer explicit src_hint (EN/DA) if available.
+            if src_hint:
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM entries
+                    WHERE trim(term) = trim(?) COLLATE NOCASE
+                      AND upper(trim(dst_lang)) = upper(trim(?))
+                      AND upper(trim(src_lang)) = upper(trim(?))
+                    ORDER BY
+                        COALESCE(last_used, created_at) DESC,
+                        created_at DESC
+                    LIMIT 1
+                    """,
+                    (term, dst_lang, src_hint),
+                ).fetchone()
+                if row:
+                    return dict(row)
+
+            # 2) Fallback: any src_lang.
             row = conn.execute(
                 """
                 SELECT *
                 FROM entries
                 WHERE trim(term) = trim(?) COLLATE NOCASE
-                AND upper(trim(dst_lang)) = upper(trim(?))
+                  AND upper(trim(dst_lang)) = upper(trim(?))
                 ORDER BY
                     COALESCE(last_used, created_at) DESC,
                     created_at DESC
@@ -47,6 +74,7 @@ class TranslationRepo:
                 """,
                 (term, dst_lang),
             ).fetchone()
+
             return dict(row) if row else None
 
     def touch_base_usage(self, entry_id: int, now_s: str) -> None:
@@ -96,21 +124,59 @@ class TranslationRepo:
     # -------------------------
     # Context cache: entries_ctx
     # -------------------------
-    def get_ctx_entry(self, term: str, src_lang: str, dst_lang: str, ctx_hash: str) -> Optional[dict]:
+    def get_ctx_entry(
+        self,
+        term: str,
+        src_lang: str | None,
+        dst_lang: str,
+        ctx_hash: str,
+    ) -> Optional[dict]:
+        """
+        Return cached context entry for (term, src_lang, dst_lang, ctx_hash).
+
+        Notes:
+        - term matching is case-insensitive and trimmed
+        - language codes are compared as UPPER(TRIM(...))
+        - if src_lang is empty/None, fall back to any src_lang
+        """
         with self.db.read() as conn:
             ensure_schema(conn)
+
+            term_n = (term or "").strip()
+            dst_n = (dst_lang or "").strip()
+            src_n = (src_lang or "").strip()
+
+            # 1) Prefer exact src_lang if provided
+            if src_n:
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM entries_ctx
+                    WHERE trim(term) = trim(?) COLLATE NOCASE
+                      AND upper(trim(src_lang)) = upper(trim(?))
+                      AND upper(trim(dst_lang)) = upper(trim(?))
+                      AND ctx_hash = ?
+                    LIMIT 1
+                    """,
+                    (term_n, src_n, dst_n, ctx_hash),
+                ).fetchone()
+                if row:
+                    return dict(row)
+
+            # 2) Fallback: any src_lang (helps when src_hint/detection was missing)
             row = conn.execute(
                 """
                 SELECT *
                 FROM entries_ctx
-                WHERE term = ?
-                  AND src_lang = ?
-                  AND dst_lang = ?
+                WHERE trim(term) = trim(?) COLLATE NOCASE
+                  AND upper(trim(dst_lang)) = upper(trim(?))
                   AND ctx_hash = ?
+                ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                (term, src_lang, dst_lang, ctx_hash),
+                (term_n, dst_n, ctx_hash),
             ).fetchone()
+
             return dict(row) if row else None
 
     def touch_ctx_usage(self, term: str, src_lang: str, dst_lang: str, ctx_hash: str, now_s: str) -> None:
@@ -201,6 +267,8 @@ class TranslationRepo:
                 "adverb": _loads(row["defs_adv"]),
                 "other": _loads(row["defs_other"]),
                 "raw_json": row["raw_json"],
+                "audio_main": row["audio_main"],
+                "audio_ids": _loads(row["audio_ids"]),
                 "created_at": row["created_at"],
             }
 
@@ -227,16 +295,20 @@ class TranslationRepo:
                 INSERT INTO mw_definitions (
                     term, src_lang,
                     defs_noun, defs_verb, defs_adj, defs_adv, defs_other,
-                    raw_json, created_at
+                    raw_json,
+                    audio_main, audio_ids,
+                    created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(term, src_lang) DO UPDATE SET
                     defs_noun  = excluded.defs_noun,
                     defs_verb  = excluded.defs_verb,
                     defs_adj   = excluded.defs_adj,
                     defs_adv   = excluded.defs_adv,
                     defs_other = excluded.defs_other,
-                    raw_json   = excluded.raw_json
+                    raw_json   = excluded.raw_json,
+                    audio_main = excluded.audio_main,
+                    audio_ids  = excluded.audio_ids
                 """,
                 (
                     term,
@@ -247,6 +319,8 @@ class TranslationRepo:
                     _dumps(defs.get("adverb")),
                     _dumps(defs.get("other")),
                     defs.get("raw_json"),
+                    defs.get("audio_main"),
+                    _dumps(defs.get("audio_ids")),
                     now_s,
                 ),
             )
