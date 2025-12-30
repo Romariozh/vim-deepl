@@ -1446,123 +1446,39 @@ function! deepl#show_defs() abort
   let l:source      = get(l:resp, 'source', l:word)
   let l:translation = get(l:resp, 'text', '')
 
-  " Determine whether context was actually used.
+  " Build the right-side tag: SRC + optional CTX.
   let l:ctx_used = get(l:resp, 'context_used', v:false)
-
-  " Determine source label.
-  let l:from_cache   = get(l:resp, 'from_cache', v:false)
-  let l:cache_source = get(l:resp, 'cache_source', '')
+  let l:from_cache = get(l:resp, 'from_cache', v:false)
 
   " Source label:
   " - from_cache=true  -> Dictionary (SQLite)
   " - from_cache=false -> DeepL API (fresh request)
   let l:src_label = l:from_cache ? 'Dictionary' : 'DeepL API'
 
-  " Build right-side tag: SRC + optional CTX
+  " Right-side tag: 'SRC: ...' + optional ' | CTX'
   let l:src_tag = 'SRC: ' . l:src_label
   if l:ctx_used
     let l:src_tag .= ' | CTX'
   endif
 
-  " Left side header: "word → translation"
-  let l:left = empty(l:translation) ? l:source : (l:source . ' → ' . l:translation)
+  " Build popup lines via MW popup module (raw_json is stored in SQLite).
+  let l:mw = l:resp.mw_definitions
+  let g:deepl_mw_audio_ids = get(l:mw, 'audio_ids', [])
+  let g:deepl_mw_audio_idx = 0
 
-  " Single header line: hard right-align src_tag to popup width
   let l:width = get(g:, 'deepl_mw_popup_width', 80)
 
-  " Always keep at least 1 space between left and right parts
-  let l:space = l:width - strdisplaywidth(l:left) - strdisplaywidth(l:src_tag)
-  if l:space < 1
-    let l:space = 1
-  endif
-
-  let l:header_line = l:left . repeat(' ', l:space) . l:src_tag
-
-  " Build popup lines (context + header + word info + POS sections).
-  let l:mw = l:resp.mw_definitions
-  let l:lines = []
-
-  " Keep the original right-aligned header line (word → translation + SRC/CTX tag).
-  call add(l:lines, l:header_line)
-  call add(l:lines, '')
-
-  " Show structured word info if provided by backend (parsed MW v2).
-  let l:status = get(l:mw, 'status', '')
-  let l:info = get(l:mw, 'info', {})
-
-  if type(l:info) == v:t_dict && !empty(l:info)
-    let l:hw   = get(l:info, 'headword', '')
-    let l:pron = get(l:info, 'pronunciation', '')
-    let l:pos  = get(l:info, 'main_pos', '')
-    let l:stems = get(l:info, 'stems', [])
-    let l:has_audio = get(l:info, 'has_audio', v:false)
-
-    if type(l:hw) == v:t_string && !empty(l:hw)
-      call add(l:lines, 'HW: ' . l:hw)
-    endif
-    if type(l:pron) == v:t_string && !empty(l:pron)
-      call add(l:lines, 'PRON: ' . l:pron)
-    endif
-    if type(l:pos) == v:t_string && !empty(l:pos)
-      call add(l:lines, 'POS: ' . l:pos)
-    endif
-
-    if type(l:stems) == v:t_list && !empty(l:stems)
-      " Limit stems to keep popup readable.
-      call add(l:lines, 'STEMS: ' . join(l:stems[:15], ', '))
-    endif
-
-    call add(l:lines, 'AUDIO: ' . (l:has_audio ? 'yes (F2)' : 'no'))
-    call add(l:lines, '')
-  endif
-
-  " Suggestions mode (MW returned a list of strings).
-  if l:status ==# 'suggestions'
-    let l:sugg = get(l:mw, 'suggestions', [])
-    if type(l:sugg) == v:t_list && len(l:sugg) > 0
-      call add(l:lines, 'SUGGESTIONS:')
-      for l:s in l:sugg
-        if type(l:s) == v:t_string && !empty(l:s)
-          call add(l:lines, '• ' . l:s)
-        endif
-      endfor
-    else
-      call add(l:lines, '(no suggestions)')
-    endif
-
-    call s:deepl_show_defs_buffer(l:lines, '-  MW  -')
-    return
-  endif
-
-  " Definitions sections in stable order.
-  let l:sections = ['noun', 'verb', 'adjective', 'adverb', 'other']
-  let l:defs_count = 0
-
-  for l:sec in l:sections
-    let l:defs = get(l:mw, l:sec, [])
-    if type(l:defs) == v:t_list && len(l:defs) > 0
-      let l:defs_count += len(l:defs)
-      call add(l:lines, toupper(l:sec) . ':')
-      for l:d in l:defs
-        if type(l:d) == v:t_string && !empty(l:d)
-          call add(l:lines, '• ' . l:d)
-        endif
-      endfor
-      call add(l:lines, '')
-    endif
-  endfor
-
-  " If nothing was printed besides header/context, show a fallback message.
-  if l:defs_count == 0
-    call add(l:lines, '(no MW definitions)')
-  endif
-
-  " Trim trailing blank lines.
-  while len(l:lines) > 0 && l:lines[-1] ==# ''
-    call remove(l:lines, -1)
-  endwhile
-
-  call s:deepl_show_defs_buffer(l:lines, '-  MW  -')
+  let l:lines = deepl#mw_popup#build_lines(
+        \ l:source,
+        \ l:translation,
+        \ get(l:mw, 'raw_json', ''),
+        \ l:width,
+        \ l:src_tag,
+        \ )
+  
+  " Title is used as a compact header line for SRC/CTX.
+  let l:title = '-  MW  -  ' . l:src_tag. ' '
+  call s:deepl_show_defs_buffer(l:lines, l:title)
 
 endfunction
 
@@ -1603,6 +1519,14 @@ function! s:deepl_show_defs_buffer(lines, title) abort
     call win_execute(l:popup_id, 'setlocal breakat=\ \	.,;:!?)]}''"')
     call win_execute(l:popup_id, 'setlocal showbreak=↳\ ')
     call s:deepl_defs_popup_apply_hl(l:popup_id)
+    " MW popup highlighting (autoloaded).
+    try
+      call deepl#mw_hl#apply(l:popup_id)
+    catch
+      echohl ErrorMsg
+      echom 'MW hl error: ' . v:exception
+      echohl None
+    endtry
     return
   endif
 
@@ -1712,6 +1636,17 @@ function! s:deepl_build_mw_popup_lines(term, translation, ctx_text, mw) abort
 endfunction
 
 " -------------------------------------------------------
+" Run a shell command in background without blocking Vim.
+function! s:run_bg(cmd) abort
+  if exists('*job_start')
+    " Vim job control (preferred).
+    call job_start(['sh', '-lc', a:cmd], {'out_io': 'null', 'err_io': 'null'})
+  else
+    " Fallback for very old Vim.
+    call system(a:cmd . ' >/dev/null 2>&1 &')
+  endif
+endfunction
+" -------------------------------------------------------
 function! s:deepl_defs_popup_apply_hl(popup_id) abort
   let l:winid = a:popup_id
 
@@ -1765,8 +1700,7 @@ function! s:popup_scroll(id, delta) abort
 endfunction
 " -------------------------------------------------------
 function! s:deepl_popup_filter(id, key) abort
- 
-    if a:key ==# "\<Esc>"
+  if a:key ==# "\<Esc>"
     call popup_close(a:id)
     return ''
   endif
@@ -1778,6 +1712,22 @@ function! s:deepl_popup_filter(id, key) abort
 
   if a:key ==# 'k' || a:key ==# "\<Up>" || a:key ==# "\<ScrollWheelUp>"
     call s:popup_scroll(a:id, -1)
+    return ''
+  endif
+
+  " Play MW audio (F4).
+  if a:key ==# "\<F4>"
+    if get(g:, 'deepl_backend', '') !=# 'http'
+      echo "MW audio requires g:deepl_backend='http'"
+      return ''
+    endif
+
+    let g:deepl_mw_audio_idx = deepl#mw_audio#handle_f4(
+          \ function('s:http_post_json'),
+          \ get(g:, 'deepl_api_base', ''),
+          \ get(g:, 'deepl_mw_audio_ids', []),
+          \ get(g:, 'deepl_mw_audio_idx', 0)
+          \ )
     return ''
   endif
 
