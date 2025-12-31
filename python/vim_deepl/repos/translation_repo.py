@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 from vim_deepl.repos.schema import ensure_schema
 from vim_deepl.repos.sqlite_repo import SQLiteRepo
@@ -113,8 +113,6 @@ class TranslationRepo:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 0)
                 ON CONFLICT(term, src_lang, dst_lang) DO UPDATE SET
-                    translation  = excluded.translation,
-                    detected_raw = excluded.detected_raw,
                     last_used    = excluded.last_used,
                     count        = entries.count + 1
                 """,
@@ -195,6 +193,25 @@ class TranslationRepo:
                 (now_s, term, src_lang, dst_lang, ctx_hash),
             )
 
+    def list_ctx_translations(self, term: str, src_lang: str, dst_lang: str, limit: int = 10) -> List[str]:
+        with self.db.tx() as conn:
+            ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT translation, MAX(COALESCE(last_used, created_at)) AS lu
+                FROM entries_ctx
+                WHERE term = ?
+                  AND src_lang = ?
+                  AND dst_lang = ?
+                GROUP BY translation
+                ORDER BY lu DESC
+                LIMIT ?
+                """,
+                (term, src_lang, dst_lang, limit),
+            ).fetchall()
+
+        return [r[0] for r in rows if r and r[0]]
+
     def upsert_ctx_entry(
         self,
         term: str,
@@ -205,12 +222,15 @@ class TranslationRepo:
         now_s: str,
         ctx_text: str = "",
     ) -> None:
+        MAX_CTX = 3
+
         with self.db.tx() as conn:
             ensure_schema(conn)
 
             # Normalize context text for storage
             ctx_text = " ".join((ctx_text or "").split())
 
+            # Upsert the (term, src, dst, ctx_hash) context entry
             conn.execute(
                 """
                 INSERT INTO entries_ctx (
@@ -230,6 +250,40 @@ class TranslationRepo:
                                   END
                 """,
                 (term, translation, src_lang, dst_lang, ctx_hash, ctx_text, now_s, now_s),
+            )
+
+            # Keep only MAX_CTX contexts per (term, src_lang, dst_lang),
+            # prefer most recently used; never delete the current ctx_hash.
+            conn.execute(
+                """
+                DELETE FROM entries_ctx
+                WHERE id IN (
+                    SELECT id
+                    FROM entries_ctx
+                    WHERE term = ?
+                      AND src_lang = ?
+                      AND dst_lang = ?
+                      AND ctx_hash != ?
+                    ORDER BY
+                      COALESCE(last_used, created_at) ASC,
+                      id ASC
+                    LIMIT (
+                        SELECT CASE
+                                 WHEN COUNT(*) > ? THEN COUNT(*) - ?
+                                 ELSE 0
+                               END
+                        FROM entries_ctx
+                        WHERE term = ?
+                          AND src_lang = ?
+                          AND dst_lang = ?
+                    )
+                )
+                """,
+                (
+                    term, src_lang, dst_lang, ctx_hash,
+                    MAX_CTX, MAX_CTX,
+                    term, src_lang, dst_lang,
+                ),
             )
 
     # -------------------------

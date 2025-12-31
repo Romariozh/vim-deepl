@@ -28,9 +28,8 @@ def parse_dt(s: str) -> datetime:
 
 
 def ctx_hash(context: str) -> str:
-    ctx = (context or "").strip()
+    ctx = " ".join((context or "").split())  # normalize like storage
     return hashlib.sha256(ctx.encode("utf-8")).hexdigest()
-
 
 def normalize_src_lang(detected: str, src_hint: str) -> str:
     code = (detected or "").upper()

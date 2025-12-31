@@ -6,8 +6,10 @@
 " Build popup lines for MW definitions using *raw* JSON stored in the database.
 " The output is a list of strings suitable for popup_create()/setline().
 function! deepl#mw_popup#build_lines(source, translation, raw_json, width, ...) abort
-  " Optional right-side tag (unused in this layout, but keep for compatibility)
+  " a:1 = src_tag (string, optional)
+  " a:2 = ctx_translations (list, optional)
   let l:src_tag = (a:0 >= 1 && type(a:1) == v:t_string) ? a:1 : ''
+  let l:alts    = (a:0 >= 2 && type(a:2) == v:t_list) ? a:2 : []
 
   let l:lines = []
 
@@ -22,8 +24,19 @@ function! deepl#mw_popup#build_lines(source, translation, raw_json, width, ...) 
 
   " 1) Header line: centered [ word / translation ] with a top padding line
   let l:word = a:source
-  let l:trn  = a:translation
-  let l:hdr  = '[ ' . l:word . ' / ' . l:trn . ' ]'
+  " Build translations list: primary + unique alternatives
+  let l:trs = []
+  if type(a:translation) == v:t_string && !empty(a:translation)
+    call add(l:trs, a:translation)
+  endif
+  for l:t in l:alts
+    if type(l:t) == v:t_string && !empty(l:t) && index(l:trs, l:t) < 0
+      call add(l:trs, l:t)
+    endif
+  endfor
+
+  let l:trn = join(l:trs, ', ')
+  let l:hdr = '[ ' . l:word . ' / ' . l:trn . ' ]'
 
   " Add an empty first line (top padding)
   call add(l:lines, '')
@@ -89,9 +102,8 @@ function! deepl#mw_popup#build_lines(source, translation, raw_json, width, ...) 
   let l:cs = s:extract_comp_sup(l:main)
   if !empty(l:cs)
     call extend(l:lines, l:cs)
+    call add(l:lines, '')
   endif
-
-  call add(l:lines, '')
 
   " 5) Definitions grouped by part of speech (fl)
   let l:pos = s:collect_defs_by_fl(l:entries, l:word)
@@ -112,8 +124,8 @@ function! deepl#mw_popup#build_lines(source, translation, raw_json, width, ...) 
   " Etymology: Etymology:
   let l:ety = s:extract_etymology(l:main)
   if type(l:ety) == v:t_string && !empty(l:ety)
-    call add(l:lines, '')
     call add(l:lines, '  Etymology: ' . l:ety)
+    call add(l:lines, '')
   endif
   
   " Trim trailing blank lines

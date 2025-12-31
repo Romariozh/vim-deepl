@@ -122,13 +122,13 @@ class TranslationService:
           - MW definitions returned for EN
         """
         target_lang = (target_lang or "RU").upper()
-        ctx = (context or "").strip()
+        ctx_text = " ".join((context or "").split())  # canonical normalized context
 
         # 1) CONTEXT MODE (separate cache: entries_ctx)
-        if ctx:
+        if ctx_text:
             src_expected = (src_hint or "").upper() or "EN"
             src_for_mw = _mw_src_lang(word, src_hint, src_expected)  # detected_lang unknown here; use src_expected
-            h = self.deps.ctx_hash(ctx)
+            h = self.deps.ctx_hash(ctx_text)
 
             cached = self.repo.get_ctx_entry(word, src_expected, target_lang, h)
             if cached:
@@ -137,6 +137,7 @@ class TranslationService:
                     self.repo.upsert_base_entry(word, cached["translation"], cached["src_lang"], target_lang, "", now_s, context=context)
 
                 mw_defs = self._ensure_mw_definitions(word, src_for_mw, now_s)
+                alts = self.repo.list_ctx_translations(word, cached["src_lang"], target_lang, limit=10)
 
                 return {
                     "type": "word",
@@ -152,9 +153,11 @@ class TranslationService:
                     "mw_definitions": mw_defs,
                     "context_used": True,
                     "cache_source": "context",
+                    "context_raw": cached.get("ctx_text", ctx_text),
+                    "ctx_translations": alts,
                 }
 
-            tr, detected, err = self.deps.deepl_call(word, target_lang, context=ctx)
+            tr, detected, err = self.deps.deepl_call(word, target_lang, context=ctx_text)
             if err:
                 return {
                     "type": "word",
@@ -170,6 +173,7 @@ class TranslationService:
                     "mw_definitions": None,
                     "context_used": True,
                     "cache_source": None,
+                    "context_raw": ctx_text,
                 }
 
             src = self.deps.normalize_src_lang(detected, src_hint)
@@ -178,9 +182,10 @@ class TranslationService:
             self.repo.upsert_base_entry(word, tr, src, target_lang, detected, now_s, context=context)
 
             # write context entry
-            ctx_text = " ".join(ctx.split())  # normalize spaces/newlines
-            self.repo.upsert_ctx_entry(word, tr, src, target_lang, h, now_s, ctx_text=context)
+            if ctx_text:
+                self.repo.upsert_ctx_entry(word, tr, src, target_lang, h, now_s, ctx_text=ctx_text)
 
+            alts = self.repo.list_ctx_translations(word, src, target_lang, limit=10)
             mw_defs = self._ensure_mw_definitions(word, src, now_s)
 
             return {
@@ -197,6 +202,8 @@ class TranslationService:
                 "mw_definitions": mw_defs,
                 "context_used": True,
                 "cache_source": None,
+                "context_raw": ctx_text,
+                "ctx_translations": alts,
             }
 
         # 2) BASE MODE (original cache: entries)
@@ -206,6 +213,7 @@ class TranslationService:
 
             src_for_mw = _mw_src_lang(word, src_hint, row["src_lang"])
             mw_defs = self._ensure_mw_definitions(word, src_for_mw, now_s)
+            alts = self.repo.list_ctx_translations(word, row["src_lang"], target_lang, limit=10)
 
 
             return {
@@ -222,6 +230,7 @@ class TranslationService:
                 "mw_definitions": mw_defs,
                 "context_used": False,
                 "cache_source": "base",
+                "ctx_translations": alts,
             }
 
         tr, detected, err = self.deps.deepl_call(word, target_lang, context="")

@@ -768,7 +768,7 @@ function! s:deepl_trainer_hl_in_context(bufnr, winid, word, group) abort
   " Найдём строку, которая начинается с "Context:"
   let l:ctx_lnum = -1
   for l:i in range(1, len(l:lines))
-    if l:lines[l:i - 1] =~# '^Context:'
+    if l:lines[l:i - 1] =~# '^CTX:'
       let l:ctx_lnum = l:i
       break
     endif
@@ -1468,13 +1468,19 @@ function! deepl#show_defs() abort
 
   let l:width = get(g:, 'deepl_mw_popup_width', 80)
 
+  let l:alts = get(l:resp, 'ctx_translations', [])
+  if type(l:alts) != v:t_list
+    let l:alts = []
+  endif
+  
   let l:lines = deepl#mw_popup#build_lines(
         \ l:source,
         \ l:translation,
         \ get(l:mw, 'raw_json', ''),
         \ l:width,
         \ l:src_tag,
-        \ )
+        \ l:alts,
+        \ ) 
   
   " Title is used as a compact header line for SRC/CTX.
   let l:title = '-  MW  -  ' . l:src_tag. ' '
@@ -1491,7 +1497,10 @@ endfunction
 function! s:deepl_show_defs_buffer(lines, title) abort
   if has('popupwin')
     let width  = get(g:, 'deepl_mw_popup_width', 80)
-    let height = len(a:lines) > 20 ? 20 : len(a:lines)
+
+    let maxh = get(g:, 'deepl_mw_popup_maxheight', 21)
+    let height = len(a:lines) > maxh ? maxh : len(a:lines)
+    let height = height + 1
 
     let l:opts = {
           \ 'title': a:title,
@@ -1508,6 +1517,7 @@ function! s:deepl_show_defs_buffer(lines, title) abort
           \ 'mapping': v:true,
           \ 'filter': function('s:deepl_popup_filter'),
           \ 'shadow': 1,
+          \ 'scrollbar': 1,
           \ 'shadowhighlight': 'Pmenu',
           \ 'line': (&lines / 2) - (height / 2),
           \ 'col':  (&columns / 2) - (width  / 2),

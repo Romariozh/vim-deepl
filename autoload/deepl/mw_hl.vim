@@ -17,7 +17,7 @@ function! deepl#mw_hl#ensure_groups() abort
     highlight DeeplMWStemsLine gui=italic cterm=italic
     highlight DeeplMWStemsLabel guifg=#13889B ctermfg=30
     highlight DeeplMWPos     guifg=#B4A868                 cterm=NONE
-    highlight DeeplMWEty     guifg=#484537                 cterm=NONE
+    highlight DeeplMWEty     guifg=#5A8390                 cterm=NONE
     highlight link DeeplMWWrapArrow NonText
 
   else
