@@ -1392,6 +1392,7 @@ endfunction
 " -------------------------------------------------------
 " Show Merriam-Webster definitions for the word under cursor (if available).
 function! deepl#show_defs() abort
+
   let l:word = expand('<cword>')
   if empty(l:word)
     echo "No word under cursor"
@@ -1486,6 +1487,8 @@ function! deepl#show_defs() abort
   let l:title = '-  MW  -  ' . l:src_tag. ' '
   call s:deepl_show_defs_buffer(l:lines, l:title)
 
+  " move cursor to 1st char in line (like pressing 0)
+  silent! keepjumps normal! 0
 endfunction
 
 function! deepl#debug_sentence_context() abort
