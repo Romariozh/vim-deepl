@@ -7,7 +7,7 @@ function! deepl#mw_audio#play_cached(path) abort
   endif
 
   " Hard defaults: no .vimrc required.
-  let l:sock   = '/tmp/pulse-native'
+  let l:sock   = '/home/ro_/.cache/pulse-native'
   let l:player = 'mplayer'
   let l:ao     = 'pulse'
   let l:reps   = 2
@@ -19,7 +19,8 @@ function! deepl#mw_audio#play_cached(path) abort
   endif
 
   let l:path = shellescape(a:path)
-  let l:env  = 'PULSE_SERVER=unix:' . shellescape(l:sock)
+  "let l:env  = 'PULSE_SERVER=unix:' . shellescape(l:sock)
+  let l:env  = 'PULSE_SERVER=' . shellescape('unix:' . l:sock)
 
   let l:cmd = l:env . ' ' . l:player . ' -really-quiet -ao ' . l:ao . ' ' . l:path
   let l:script = l:cmd . '; sleep ' . l:delay . '; ' . l:cmd
@@ -34,6 +35,28 @@ function! deepl#mw_audio#play_cached(path) abort
       endtry
     endif
     let s:mw_audio_job = job_start(['sh', '-lc', l:script], {'out_io': 'null', 'err_io': 'null'})
+  " DEBUG: capture stderr/stdout so we can see why it doesn't play
+  "let l:log = '/tmp/vim-deepl-mw-audio.err'
+  "let l:script = l:script . ' 2>>' . shellescape(l:log) . ' 1>>' . shellescape(l:log)
+
+  " Run in background (no blocking).
+  "if exists('*job_start')
+    "if type(s:mw_audio_job) == v:t_number && s:mw_audio_job > 0
+      "try
+        "call job_stop(s:mw_audio_job, 'term')
+      "catch
+      "endtry
+    "endif
+
+    "call writefile(['--- ' . strftime('%F %T') . ' ---'], l:log, 'a')
+    "call writefile(['CMD: ' . l:script], l:log, 'a')
+
+    "let s:mw_audio_job = job_start(['sh', '-lc', l:script], {'out_io': 'null', 'err_io': 'null'})
+  "else
+    "call system(l:script . ' >/dev/null 2>&1 &')
+  "endif
+  "echo 'MW audio debug log: ' . l:log
+"-------------
   else
     call system(l:script . ' >/dev/null 2>&1 &')
   endif

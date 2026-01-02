@@ -6,6 +6,9 @@ from typing import Optional
 
 from vim_deepl.services.mw_audio_service import ensure_mw_audio_cached, play_audio_twice_in_background
 from fastapi.responses import FileResponse
+from fastapi import HTTPException
+import logging
+log = logging.getLogger("uvicorn.error")
 
 router = APIRouter()
 
@@ -25,6 +28,7 @@ def mw_audio_play(req: MWPlayReq):
     if any(c in audio_id for c in ("/", "\\", " ", "\t", "\n")):
         raise HTTPException(status_code=400, detail="invalid audio_id")
 
+    # ✅ EXACTLY ONE call
     try:
         path = ensure_mw_audio_cached(audio_id)
     except Exception as e:
@@ -33,11 +37,20 @@ def mw_audio_play(req: MWPlayReq):
     if req.play_server:
         ok, msg = play_audio_twice_in_background(path, delay_sec=2.0)
         status = "ok" if ok else "cached_only"
-        return {"status": status, "audio_id": audio_id, "cached_path": str(path), "playback": msg}
+        return {
+            "status": status,
+            "audio_id": audio_id,
+            "cached_path": str(path),
+            "playback": msg,
+        }
 
     # cache-only mode
-    return {"status": "cached_only", "audio_id": audio_id, "cached_path": str(path), "playback": "cache_only"}
-
+    return {
+        "status": "cached_only",
+        "audio_id": audio_id,
+        "cached_path": str(path),
+        "playback": "cache_only",
+    }
 
 @router.get("/mw/audio/file/{audio_id}")
 def mw_audio_file(audio_id: str):

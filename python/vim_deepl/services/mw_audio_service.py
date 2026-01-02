@@ -11,14 +11,19 @@ from pathlib import Path
 from typing import Optional, Set
 
 import urllib.request
+import logging
+log = logging.getLogger("uvicorn.error")
+log.info("[mw_audio] LOADED_FROM=%s", __file__)
 
-DEFAULT_PULSE_NATIVE_SOCK = "/tmp/pulse-native"
+
+DEFAULT_PULSE_NATIVE_SOCK = "/home/ro_/.cache/pulse-native"
 
 _AUDIO_LOCK = threading.Lock()
 _AUDIO_COND = threading.Condition(_AUDIO_LOCK)
 
 _PLAY_TOKEN = 0
 _CURRENT_PROC: subprocess.Popen | None = None
+_WORKER_THREAD: threading.Thread | None = None
 
 # Pending request for the worker thread
 _PENDING_REQ: tuple[int, Path, float] | None = None
@@ -71,19 +76,54 @@ def ensure_mw_audio_cached(audio_id: str) -> Path:
     """
     cache_dir = mw_audio_cache_dir()
     dst = cache_dir / f"{audio_id}.mp3"
-    if dst.exists() and dst.stat().st_size > 0:
-        return dst
+
+    # HIT (cache already exists)
+    if dst.exists():
+        try:
+            size = dst.stat().st_size
+        except OSError as e:
+            # Если stat/exists глюканули — просто попробуем перекачать (редко).
+            log.warning("[mw_audio] HIT_CHECK_FAILED audio_id=%r path=%r err=%s", audio_id, str(dst), e)
+        else:
+            if size > 0:
+                log.info("[mw_audio] HIT audio_id=%r path=%r size=%s", audio_id, str(dst), size)
+                return dst
 
     url = mw_audio_url(audio_id, lang="en", country="us", fmt="mp3")
     tmp = cache_dir / f".{audio_id}.mp3.tmp"
 
     req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        tmp.write_bytes(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            status: Optional[int] = getattr(resp, "status", None)
+            ctype = resp.headers.get("Content-Type", "")
 
-    tmp.replace(dst)
-    return dst
+            if status is not None and status != 200:
+                raise RuntimeError(f"HTTP {status}")
 
+            # Защита от HTML/ошибок вместо mp3
+            if ctype and ("audio" not in ctype and "mpeg" not in ctype and "mp3" not in ctype):
+                raise RuntimeError(f"unexpected content-type: {ctype}")
+
+            data = resp.read()
+            if not data:
+                raise RuntimeError("empty response body")
+
+        tmp.write_bytes(data)
+        tmp.replace(dst)  # атомарно
+        size = dst.stat().st_size
+        log.info("[mw_audio] DOWNLOADED audio_id=%r path=%r size=%s", audio_id, str(dst), size)
+        return dst
+
+    except Exception as e:
+        # best-effort cleanup
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        log.warning("[mw_audio] FAILED audio_id=%r url=%r path=%r err=%s", audio_id, url, str(dst), e)
+        raise
 
 def pick_player() -> Optional[list[str]]:
     """
@@ -105,9 +145,9 @@ def _build_audio_env() -> dict[str, str]:
     """
     Build environment for audio playback.
 
-    We default to PulseAudio-over-SSH socket at /tmp/pulse-native, so
+    We default to PulseAudio-over-SSH socket at /home/ro_/.cache/pulse-native, so
     audio goes to the host when user connected with:
-      ssh -R /tmp/pulse-native:/run/user/1000/pulse/native vm_fedora
+      ssh -R /home/ro_/.cache/pulse-native:/run/user/1000/pulse/native vm_fedora
     """
     env = dict(os.environ)
     env.setdefault("PULSE_SERVER", f"unix:{DEFAULT_PULSE_NATIVE_SOCK}")
@@ -204,73 +244,92 @@ def _audio_worker_loop(player: list[str], env: dict[str, str]) -> None:
     global _CURRENT_PROC, _PENDING_REQ, _PLAY_TOKEN
 
     while True:
-        with _AUDIO_COND:
-            while _PENDING_REQ is None:
-                _AUDIO_COND.wait()
+        try:
+            with _AUDIO_COND:
+                while _PENDING_REQ is None:
+                    _AUDIO_COND.wait()
 
-            token, file_path, delay_sec = _PENDING_REQ
-            _PENDING_REQ = None
+                token, file_path, delay_sec = _PENDING_REQ
+                log.debug("[mw_audio] WORKER_GOT token=%s play_token=%s file=%r delay=%s", token, _PLAY_TOKEN, str(file_path), delay_sec)
+                _PENDING_REQ = None
 
-            # Cancel any current playback immediately
-            p = _CURRENT_PROC
-            _CURRENT_PROC = None
-
-        _stop_proc(p)
-
-        # Play twice sequentially. At any moment a newer token may arrive -> cancel.
-        for i in range(2):
-            with _AUDIO_LOCK:
-                if token != _PLAY_TOKEN:
-                    break
-
-            try:
-                p = subprocess.Popen(
-                    player + [str(file_path)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=env,
-                    start_new_session=True,
-                )
-            except Exception:
-                break
-
-            with _AUDIO_LOCK:
-                if token != _PLAY_TOKEN:
-                    _stop_proc(p)
-                    break
-                _CURRENT_PROC = p
-
-            # Best-effort: set stream volume to 100%
-            _set_sink_input_volume_for_pid(p.pid, env, volume="100%")
-
-            # Wait for playback to finish (prevents overlap inside the worker)
-            try:
-                p.wait(timeout=10.0)
-            except Exception:
-                _stop_proc(p)
-
-            with _AUDIO_LOCK:
-                if token != _PLAY_TOKEN:
-                    break
-
-            if i == 0:
-                # Sleep in small steps so cancellation reacts fast
-                end_at = time.time() + float(delay_sec)
-                while time.time() < end_at:
-                    with _AUDIO_LOCK:
-                        if token != _PLAY_TOKEN:
-                            break
-                    time.sleep(0.05)
-
-        with _AUDIO_LOCK:
-            # Clear proc pointer if still ours
-            if token == _PLAY_TOKEN:
+                # Cancel any current playback immediately
+                p = _CURRENT_PROC
                 _CURRENT_PROC = None
 
+            _stop_proc(p)
+
+            # Play twice sequentially. At any moment a newer token may arrive -> cancel.
+            for i in range(2):
+                with _AUDIO_LOCK:
+                    if token != _PLAY_TOKEN:
+                        break
+
+                try:
+                    p = subprocess.Popen(
+                        player + [str(file_path)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,   # <-- чтобы видеть ошибки
+                        text=True,
+                        env=env,
+                        start_new_session=True,
+                    )
+                except Exception as e:
+                    log.info("[mw_audio] WORKER_GOT token=%s play_token=%s file=%r delay=%s", token, _PLAY_TOKEN, str(file_path), delay_sec)
+                    break
+
+                with _AUDIO_LOCK:
+                    if token != _PLAY_TOKEN:
+                        _stop_proc(p)
+                        break
+                    _CURRENT_PROC = p
+
+                # Best-effort: set stream volume to 100%
+                try:
+                    _set_sink_input_volume_for_pid(p.pid, env, volume="100%")
+                except Exception as e:
+                    log.warning("[mw_audio] VOLUME_SET_FAILED pid=%s err=%s", p.pid, e)
+
+                # Wait for playback to finish
+                try:
+                    p.wait(timeout=10.0)
+                except Exception:
+                    _stop_proc(p)
+
+                # <-- логируем rc/stderr чтобы видеть, почему “тишина”
+                try:
+                    err = (p.stderr.read() if p.stderr else "")  # type: ignore[union-attr]
+                    err = (err or "")[-800:]
+                    log.info("[mw_audio] WORKER_GOT token=%s play_token=%s file=%r delay=%s", token, _PLAY_TOKEN, str(file_path), delay_sec)
+                except Exception:
+                    pass
+
+                with _AUDIO_LOCK:
+                    if token != _PLAY_TOKEN:
+                        break
+
+                if i == 0:
+                    end_at = time.time() + float(delay_sec)
+                    while time.time() < end_at:
+                        with _AUDIO_LOCK:
+                            if token != _PLAY_TOKEN:
+                                break
+                        time.sleep(0.05)
+
+            with _AUDIO_LOCK:
+                if token == _PLAY_TOKEN:
+                    _CURRENT_PROC = None
+
+        except Exception as e:
+            log.debug("[mw_audio] PLAY_EXIT rc=%s path=%r stderr=%r", p.returncode, str(file_path), err)
+            with _AUDIO_LOCK:
+                _CURRENT_PROC = None
+            time.sleep(0.1)
+            continue
 
 def play_audio_twice_in_background(file_path: Path, delay_sec: float = 1.0) -> tuple[bool, str]:
     """Queue audio playback on a single worker thread. Cancels previous playback if any."""
-    global _PLAY_TOKEN, _PENDING_REQ, _WORKER_STARTED, _CURRENT_PROC
+    global _PLAY_TOKEN, _PENDING_REQ, _WORKER_THREAD
 
     player = pick_player()
     if not player:
@@ -282,19 +341,24 @@ def play_audio_twice_in_background(file_path: Path, delay_sec: float = 1.0) -> t
         _PLAY_TOKEN += 1
         token = _PLAY_TOKEN
 
-        # Start the single worker once
-        if not _WORKER_STARTED:
-            _WORKER_STARTED = True
-            t = threading.Thread(
+        # Start/restart the worker if needed
+        if _WORKER_THREAD is None or not _WORKER_THREAD.is_alive():
+            _WORKER_THREAD = threading.Thread(
                 target=_audio_worker_loop,
                 args=(player, env),
                 daemon=True,
             )
-            t.start()
+            _WORKER_THREAD.start()
+            print("[mw_audio] WORKER_STARTED", flush=True)
 
-        # Queue/replace pending request
         _PENDING_REQ = (token, file_path, float(delay_sec))
+        alive = (_WORKER_THREAD is not None and _WORKER_THREAD.is_alive())
+        log.info("[mw_audio] QUEUE token=%s file=%r worker_alive=%s", token, str(file_path), alive)
         _AUDIO_COND.notify()
+
+        print(f"[mw_audio] QUEUE token={token} file={str(file_path)!r} delay={delay_sec} "
+              f"worker_alive={_WORKER_THREAD is not None and _WORKER_THREAD.is_alive()}",
+              flush=True)
 
     return True, f"queued: {' '.join(player)}"
 
@@ -317,11 +381,8 @@ def prefetch_mw_audio_in_background(audio_id: Optional[str]) -> None:
     def _run() -> None:
         try:
             ensure_mw_audio_cached(aid)
-            # Uncomment for debug:
-            print(f"[mw_audio] prefetch cached audio_id={aid!r}", flush=True)
-        except Exception as e:
-            # Uncomment for debug:
-            print(f"[mw_audio] prefetch failed audio_id={aid!r}: {e}", flush=True)
+        except Exception:
+            # ensure_mw_audio_cached already printed FAILED with details
             pass
         finally:
             with _PREFETCH_LOCK:
