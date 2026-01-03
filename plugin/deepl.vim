@@ -10,6 +10,16 @@ if exists('g:loaded_deepl')
 endif
 let g:loaded_deepl = 1
 
+" Autoloading BookMarks when opening a file
+augroup VimDeeplBookMarks
+  autocmd!
+  autocmd BufReadPost *.txt,*.md silent! call deepl#bookmarks#ApplyForBuffer()
+augroup END
+augroup VimDeeplBookMarksHi
+  autocmd!
+  autocmd ColorScheme * call deepl#bookmarks#ApplyForBuffer()
+augroup END
+
 " Check for +job and +channel
 if !has('job') || !has('channel')
   echohl WarningMsg
@@ -55,7 +65,7 @@ highlight default DeeplTrainerAllDone ctermfg=0 ctermbg=2 guifg=#000000 guibg=#0
 
 " === Key mappings ===
 " Normal: translate word under cursor
-nnoremap <silent> <F2>  :call deepl#translate_word()<CR>
+nnoremap <silent> <F2> :call deepl#bookmarks#TranslateWordAndMark()<CR>
 " Visual: translate selection (word / phrase / long text)
 vnoremap <silent> <F2>  y:call deepl#translate_from_visual()<CR>
 
@@ -64,7 +74,7 @@ nnoremap <silent> <F3>  :call deepl#cycle_word_src_lang()<CR>
 " Cycle target language (RU/EN/DA/...)
 nnoremap <silent> <S-F3>  :call deepl#cycle_target_lang()<CR>
 " Show MW definitions for the word under the cursor
-nnoremap <silent> <leader>d :call deepl#show_defs()<CR>
+nnoremap <silent> <leader>d :call deepl#bookmarks#ShowDefsAndMark()<CR>
 
 nnoremap <silent> <leader>s :DeepLStudyToggle<CR>
 

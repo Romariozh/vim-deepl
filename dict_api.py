@@ -23,9 +23,15 @@ from vim_deepl.repos.schema import ensure_schema
 from vim_deepl.repos.translation_repo import TranslationRepo
 from vim_deepl.services.trainer_service import TrainerConfig
 from vim_deepl.api.routes.mw_audio import router as mw_audio_router
+from vim_deepl.api.routes.bookmarks import router as bookmarks_router
+from vim_deepl.repos.book_marks_repo import BookMarksRepo
+from vim_deepl.services.bookmarks_service import BookmarksService
+
 
 app = FastAPI(title="Local Dict API")
+
 app.include_router(mw_audio_router)
+app.include_router(bookmarks_router)
 
 DICT_BASE = os.path.expanduser("~/.local/share/vim-deepl")
 _MW_TAG_RE = re.compile(r"\{[^}]+\}")  # strips {it} {/it} {bc} {ldquo} {sx|...} etc.
@@ -43,6 +49,10 @@ def _startup() -> None:
 
     app.state.sqlite = sqlite
     app.state.repo = TranslationRepo(sqlite)
+
+    # Bookmarks service (reading highlights)
+    app.state.bookmarks = BookmarksService(repo=BookMarksRepo(sqlite))
+
 
 
 def _repo(req: Request) -> TranslationRepo:

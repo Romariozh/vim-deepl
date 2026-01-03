@@ -12,9 +12,11 @@ from vim_deepl.repos.sqlite_repo import SQLiteRepo
 from vim_deepl.repos.dict_repo import DictRepo, resolve_db_path
 from vim_deepl.repos.trainer_repo import TrainerRepo
 from vim_deepl.repos.translation_repo import TranslationRepo
+from vim_deepl.repos.book_marks_repo import BookMarksRepo
 from vim_deepl.services.dict_service import DictService
 from vim_deepl.services.trainer_service import TrainerService, TrainerConfig
 from vim_deepl.services.translation_service import TranslationService, TranslationDeps
+from vim_deepl.services.bookmarks_service import BookmarksService
 from vim_deepl.integrations.merriam_webster import mw_fetch
 from vim_deepl.integrations.deepl import deepl_call
 
@@ -28,6 +30,7 @@ class TranslationHooks:
 class Services:
     dict: DictService
     trainer: TrainerService
+    bookmarks: BookmarksService
     translation: Optional[TranslationService] = None
 
 def build_services(
@@ -60,6 +63,8 @@ def build_services(
         ),
     )
 
+    bookmarks_service = BookmarksService(repo=BookMarksRepo(sqlite))
+
     translation_service = None
     if translation_hooks is not None:
         translation_deps = TranslationDeps(
@@ -73,5 +78,9 @@ def build_services(
             deps=translation_deps,
         )
 
-    return Services(dict=dict_service, trainer=trainer_service, translation=translation_service)
-
+    return Services(
+        dict=dict_service,
+        trainer=trainer_service,
+        bookmarks=bookmarks_service,
+        translation=translation_service,
+    )

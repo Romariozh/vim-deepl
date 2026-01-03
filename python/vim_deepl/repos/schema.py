@@ -123,6 +123,52 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # --- Book marks / reading highlights (vX) ---
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS book_marks (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            -- book identity
+            path         TEXT NOT NULL,      -- canonical path (realpath)
+            fingerprint  TEXT NOT NULL,      -- sha256(file)
+
+            -- position (1-based)
+            lnum         INTEGER NOT NULL,
+            col          INTEGER NOT NULL,
+            length       INTEGER NOT NULL,
+
+            -- metadata
+            term         TEXT NOT NULL,
+            kind         TEXT NOT NULL,      -- 'f2' | 'mw' (or 'seen')
+
+            created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at   TEXT
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_book_marks_place
+        ON book_marks(path, lnum, col, kind)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_book_marks_path
+        ON book_marks(path)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_book_marks_fingerprint
+        ON book_marks(fingerprint)
+        """
+    )
+
     # --- Trainer SRS extensions (v3) ---
     conn.execute("""
         CREATE TABLE IF NOT EXISTS training_cards (
@@ -155,7 +201,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_hard ON training_cards(lapses, wrong_streak)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_training_cards_last_review ON training_cards(last_review_at)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_training_cards_entry_id ON training_cards(entry_id)")
-
     conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_card_ts ON training_reviews(card_id, ts)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_training_reviews_day ON training_reviews(day)")
 
