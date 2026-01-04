@@ -215,11 +215,21 @@ class TrainerRepo:
         due_at = int(s.get("due_at") or 0)
         last_review_at = int(s.get("last_review_at") or 0)
 
-        # If values look like milliseconds -> convert to seconds.
-        if due_at > 10_000_000_000:
-            due_at //= 1000
-        if last_review_at > 10_000_000_000:
-            last_review_at //= 1000
+        def _norm_ts(v: int) -> int:
+            # Accept seconds, milliseconds, or sec*10000 (ticks).
+            # - seconds     ~ 1e9
+            # - ms          ~ 1e12
+            # - sec*10000   ~ 1e13-1e14 (your old buggy values)
+            if v <= 0:
+                return 0
+            if v > 10_000_000_000_000:  # > 1e13
+                return v // 10_000
+            if v > 100_000_000_000:     # > 1e11
+                return v // 1_000
+            return v
+
+        due_at = _norm_ts(due_at)
+        last_review_at = _norm_ts(last_review_at)
 
         # Safety clamp: if due_at is absurdly in the past, push it forward (prevents “infinite due” loops).
         if due_at and due_at < now_ts - 86400 * 365:
@@ -283,10 +293,12 @@ class TrainerRepo:
             c.id AS card_id,
             c.entry_id AS entry_id,
 
-            -- Normalize due_at: if it's milliseconds (13+ digits) -> seconds
+            -- Normalize due_at: accept seconds, milliseconds, or sec*10000 (ticks) -> seconds
             CASE
+              WHEN CAST(c.due_at AS INTEGER) > 10000000000000
+                THEN CAST(CAST(c.due_at AS INTEGER) / 10000 AS INTEGER)
               WHEN CAST(c.due_at AS INTEGER) > 100000000000
-              THEN CAST(CAST(c.due_at AS INTEGER) / 1000 AS INTEGER)
+                THEN CAST(CAST(c.due_at AS INTEGER) / 1000 AS INTEGER)
               ELSE CAST(c.due_at AS INTEGER)
             END AS due_at,
 
@@ -421,8 +433,10 @@ class TrainerRepo:
 
         due_expr = """
             CASE
+              WHEN CAST(c.due_at AS INTEGER) > 10000000000000
+                THEN CAST(CAST(c.due_at AS INTEGER) / 10000 AS INTEGER)
               WHEN CAST(c.due_at AS INTEGER) > 100000000000
-              THEN CAST(CAST(c.due_at AS INTEGER) / 1000 AS INTEGER)
+                THEN CAST(CAST(c.due_at AS INTEGER) / 1000 AS INTEGER)
               ELSE CAST(c.due_at AS INTEGER)
             END
         """
@@ -467,7 +481,10 @@ class TrainerRepo:
           AND e.ignore = 0
           AND c.due_at IS NOT NULL
           {exclude_sql}
-          AND (c.lapses > 0 OR c.wrong_streak > 0)
+          AND (
+            c.wrong_streak > 0
+            OR (c.lapses > 0 AND IFNULL(c.correct_streak, 0) < ?)
+            )
           {due_where}
           AND e.src_lang IN ({placeholders})
         ORDER BY
@@ -479,19 +496,18 @@ class TrainerRepo:
         LIMIT ?
         """
 
+        HARD_CLEAR_STREAK = 2  # keep in sync with trainer_service.py
+
         args: list[Any] = []
         args.extend(exclude_args)
         # IMPORTANT: bind order must match '?' order in SQL:
-        #   [due_where?] then src_langs (...) then ABS(due_at - now_ts) then LIMIT
+        #   [hard_clear_streak] then [due_where?] then src_langs (...) then ABS(due_at - now_ts) then LIMIT
+        args.append(HARD_CLEAR_STREAK)  # IFNULL(correct_streak,0) < ?
         if not allow_future:
             args.append(now_ts)   # due_where <= ?
         args.extend(src_langs)    # e.src_lang IN (..)
         args.append(now_ts)       # ABS(due_at - ?)
         args.append(limit)        # LIMIT ?
-
-        # Удалить после проверки
-        print("DBG hard_sql=", sql, flush=True)
-        print("DBG hard_args=", args, flush=True)
 
         rows = conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]

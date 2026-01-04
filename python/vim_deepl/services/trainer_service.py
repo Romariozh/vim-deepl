@@ -25,6 +25,10 @@ def _next_interval_days(reps: int, prev_interval: int, ef: float) -> int:
         return 3
     return max(1, int(round(prev_interval * ef)))
 
+MAX_INTERVAL_DAYS = 365
+HARD_MAX_DAYS = 90
+HARD_CLEAR_STREAK = 2  # N: How many consecutive successes are needed for the card to no longer be considered hard
+
 def compute_srs(card: Dict[str, Any], grade: int, now_ts: int) -> Dict[str, Any]:
     reps = int(card.get("reps") or 0)
     lapses = int(card.get("lapses") or 0)
@@ -45,9 +49,19 @@ def compute_srs(card: Dict[str, Any], grade: int, now_ts: int) -> Dict[str, Any]
         reps += 1
         ef = _update_ef(ef, grade)
         interval_days = _next_interval_days(reps, max(1, interval_days), ef)
-        due_at = now_ts + interval_days * 86400
+
+        # After a successful answer, increment streak first
         correct_streak += 1
         wrong_streak = 0
+
+        # Card is hard until it gets HARD_CLEAR_STREAK successful answers in a row
+        is_hard = (wrong_streak > 0) or (lapses > 0 and correct_streak < HARD_CLEAR_STREAK)
+
+        # Cap interval depending on whether it's still hard
+        cap = HARD_MAX_DAYS if is_hard else MAX_INTERVAL_DAYS
+        interval_days = max(1, min(cap, interval_days))
+
+        due_at = now_ts + interval_days * 86400
 
     return {
         "reps": reps,
@@ -117,16 +131,22 @@ class TrainerService:
                 return finalize(item)
 
             import random
-            pick_new = random.random() < float(getattr(self.cfg, "srs_new_ratio", 0.2))
+            new_ratio = float(getattr(self.cfg, "srs_new_ratio", 0.2))
+            pick_new = random.random() < new_ratio
 
+            new_items = []
             if pick_new:
                 new_items = self.repo._list_new_entries_conn(conn, src_langs, limit=1)
-                if new_items:
-                    item = new_items[0]
-                    card_id = self.repo._ensure_card_for_entry_conn(conn, item["entry_id"], now_ts)
-                    item["card_id"] = card_id
-                    item["mode"] = "srs_new"
-                    return finalize(item)
+            else:
+                # due is empty, so allow new if available
+                new_items = self.repo._list_new_entries_conn(conn, src_langs, limit=1)
+
+            if new_items:
+                item = new_items[0]
+                card_id = self.repo._ensure_card_for_entry_conn(conn, item["entry_id"], now_ts)
+                item["card_id"] = card_id
+                item["mode"] = "srs_new"
+                return finalize(item)
 
             hard_n = int(getattr(self.cfg, "hard_random_top_n", 5))
             hard = self.repo._list_hard_entries_conn(
@@ -135,10 +155,8 @@ class TrainerService:
                 now_ts=now_ts,
                 limit=max(1, hard_n),
                 exclude_card_ids=exclude_card_ids,
-                allow_future=True,
+                allow_future=False,
             )
-            # Удалить после проверки
-            print("DBG hard_cnt=", len(hard), "allow_future=True", flush=True)
 
             if hard:
                 top = hard[: max(1, min(len(hard), hard_n))]
@@ -150,6 +168,7 @@ class TrainerService:
 
                 item["mode"] = "srs_hard"
                 return finalize(item)
+
         # --- fallback to existing logic (your current implementation) ---
 
         src_filter_u = (src_filter or "").upper()

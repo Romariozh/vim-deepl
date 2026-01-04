@@ -1038,6 +1038,15 @@ function! DeepLTrainerReview(grade) abort
     echo "Trainer window is not open. Use :DeepLTrainerStart"
     return
   endif
+  
+  " In fallback mode: grades 0..5 are disabled (browse-only)
+  let l:mode = get(get(g:, 'deepl_trainer_current', {}), 'mode', '')
+  if l:mode ==# 'fallback'
+    echohl WarningMsg
+    echo "Trainer: grades 0-5 are disabled in fallback. Use: n skip • s show • q close"
+    echohl None
+    return
+  endif
 
   if empty(g:deepl_trainer_current)
     echo "Trainer: no active item"
