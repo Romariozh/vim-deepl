@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import random
 import sqlite3
+import threading
 from typing import Any, Dict, List, Optional
 from vim_deepl.repos.schema import ensure_schema
 import time
@@ -83,11 +84,23 @@ class TrainerConfig:
     srs_new_ratio: float = 0.2
 
 
-@dataclass(frozen=True)
+@dataclass
 class TrainerService:
     repo: TrainerRepo
     cfg: TrainerConfig
 
+    _schema_ready: bool = field(default=False, init=False, repr=False)
+    _schema_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def _ensure_schema_once(self) -> None:
+        if self._schema_ready:
+            return
+        with self._schema_lock:
+            if self._schema_ready:
+                return
+            with self.repo.db.tx_write() as conn:
+                ensure_schema(conn)
+            self._schema_ready = True
 
     def pick_training_word(self, src_filter: Optional[str], now: datetime, now_s: str, parse_dt, exclude_card_ids: Optional[list[int]] = None) -> Dict[str, Any]:
         """
@@ -98,6 +111,7 @@ class TrainerService:
           - return response dict (without ok/fail wrapper)
         parse_dt is injected from existing helper to preserve date parsing behavior.
         """
+        self._ensure_schema_once()
 
         # --- SRS picker (v3) ---
         src_langs = [src_filter] if src_filter else ["EN"]  # подстрой: как у тебя сейчас формируется список
@@ -120,8 +134,7 @@ class TrainerService:
 
             return item
 
-        with self.repo.db.tx() as conn:
-            ensure_schema(conn)
+        with self.repo.db.read() as conn:
             conn.row_factory = sqlite3.Row
 
             due = self.repo._list_due_entries_conn(conn, src_langs, now_ts, limit=1, exclude_card_ids=exclude_card_ids)
@@ -143,7 +156,10 @@ class TrainerService:
 
             if new_items:
                 item = new_items[0]
-                card_id = self.repo._ensure_card_for_entry_conn(conn, item["entry_id"], now_ts)
+                # ensure_card is a write -> separate short write tx
+                with self.repo.db.tx_write() as wconn:
+                    wconn.row_factory = sqlite3.Row
+                    card_id = self.repo._ensure_card_for_entry_conn(wconn, item["entry_id"], now_ts)
                 item["card_id"] = card_id
                 item["mode"] = "srs_new"
                 return finalize(item)
@@ -180,8 +196,7 @@ class TrainerService:
         # Map exclude_card_ids -> exclude_entry_ids for fallback picker
         exclude_entry_ids: set[int] = set()
         if exclude_card_ids:
-            with self.repo.db.tx() as conn:
-                ensure_schema(conn)
+            with self.repo.db.read() as conn:
                 conn.row_factory = sqlite3.Row
                 ph = ",".join(["?"] * len(exclude_card_ids))
                 sql = f"SELECT entry_id FROM training_cards WHERE id IN ({ph})"
@@ -298,8 +313,7 @@ class TrainerService:
         if ignore_exclusions and exclude_card_ids and len(pool) > 1:
             try:
                 last_cid = int(exclude_card_ids[-1])
-                with self.repo.db.tx() as conn:
-                    ensure_schema(conn)
+                with self.repo.db.read() as conn:
                     conn.row_factory = sqlite3.Row
                     r = conn.execute("SELECT entry_id FROM training_cards WHERE id=?", (last_cid,)).fetchone()
                 last_eid = int(r["entry_id"]) if r else None
@@ -318,8 +332,7 @@ class TrainerService:
         # Count should increase only when the user grades a card (review 0..5).
 
         # ensure card exists so UI/review can work uniformly
-        with self.repo.db.tx() as conn:
-            ensure_schema(conn)
+        with self.repo.db.tx_write() as conn:
             conn.row_factory = sqlite3.Row
             chosen_entry_id = int(chosen.get("entry_id") or chosen["id"])
             card_id = self.repo._ensure_card_for_entry_conn(conn, chosen_entry_id, now_ts)
@@ -346,14 +359,16 @@ class TrainerService:
         return finalize(item)
 
     def review_training_card(self, card_id: int, grade: int, now: datetime) -> Dict[str, Any]:
+
+        self._ensure_schema_once()
+
         if not (0 <= grade <= 5):
             raise ValueError("grade must be in range 0..5")
 
         now_ts = int(now.timestamp())
         day = now.date().isoformat()
 
-        with self.repo.db.tx() as conn:
-            ensure_schema(conn)
+        with self.repo.db.tx_write() as conn:
             conn.row_factory = sqlite3.Row
 
             card = self.repo._get_training_card_conn(conn, card_id)
@@ -384,10 +399,11 @@ class TrainerService:
             return srs
 
     def get_progress(self, now: datetime) -> Dict[str, Any]:
+
+        self._ensure_schema_once()
         day = now.date().isoformat()
 
-        with self.repo.db.tx() as conn:
-            ensure_schema(conn)
+        with self.repo.db.read() as conn:
             conn.row_factory = sqlite3.Row
 
             today_done = self.repo._count_reviews_for_day_conn(conn, day)

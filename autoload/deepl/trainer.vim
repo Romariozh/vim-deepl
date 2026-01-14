@@ -1,4 +1,3 @@
-
 " autoload/deepl/trainer.vim
 scriptencoding utf-8
 
@@ -27,15 +26,33 @@ function! deepl#trainer#wrap(text, width) abort
 endfunction
 
 "--------------------------------------------------------------------------
-" Green background for 'all done'
-highlight! DeeplTrainerAllDone guifg=#83C092 guibg=#384B55 ctermfg=0 ctermbg=0
+" --- Trainer mode highlights (bracket tag in header) ---
+highlight default DeeplTrainerModeDue  cterm=bold ctermfg=6  gui=bold
+highlight default DeeplTrainerModeNew  cterm=bold ctermfg=214 gui=bold
+highlight default DeeplTrainerModeHard cterm=bold ctermfg=202 gui=bold
+highlight default DeeplTrainerModeDone cterm=bold ctermfg=121 gui=bold
 
 let s:deepl_trainer_mode_ns = 0
 let s:deepl_trainer_mode_matchid = {}
 "--------------------------------------------------------------------------
-function! deepl#trainer#apply_mode_hl(bufnr, lnum, text) abort
+function! deepl#trainer#apply_mode_hl(bufnr, lnum, mode_label) abort
   if a:bufnr <= 0 || !bufexists(a:bufnr)
     return
+  endif
+
+  " Map label -> highlight group
+  let l:grp = ''
+  if a:mode_label ==# 'srs_due'
+    let l:grp = 'DeeplTrainerModeDue'
+  elseif a:mode_label ==# 'srs_new'
+    let l:grp = 'DeeplTrainerModeNew'
+  elseif a:mode_label ==# 'srs_hard'
+    let l:grp = 'DeeplTrainerModeHard'
+  elseif a:mode_label ==# 'all done'
+    let l:grp = 'DeeplTrainerModeDone'
+  else
+    " unknown / empty -> clear
+    let l:grp = ''
   endif
 
   " Neovim buffer highlight
@@ -44,17 +61,17 @@ function! deepl#trainer#apply_mode_hl(bufnr, lnum, text) abort
       let s:deepl_trainer_mode_ns = nvim_create_namespace('deepl_trainer_mode')
     endif
     call nvim_buf_clear_namespace(a:bufnr, s:deepl_trainer_mode_ns, 0, -1)
-    if empty(a:text)
+    if empty(l:grp) || empty(a:mode_label)
       return
     endif
 
     let l:line = getbufline(a:bufnr, a:lnum)[0]
-    let l:idx = stridx(l:line, a:text)
+    let l:idx = stridx(l:line, a:mode_label)
     if l:idx < 0
       return
     endif
-    call nvim_buf_add_highlight(a:bufnr, s:deepl_trainer_mode_ns, 'DeeplTrainerAllDone',
-          \ a:lnum - 1, l:idx, l:idx + strlen(a:text))
+    call nvim_buf_add_highlight(a:bufnr, s:deepl_trainer_mode_ns, l:grp,
+          \ a:lnum - 1, l:idx, l:idx + strlen(a:mode_label))
     return
   endif
 
@@ -70,69 +87,45 @@ function! deepl#trainer#apply_mode_hl(bufnr, lnum, text) abort
     call remove(s:deepl_trainer_mode_matchid, l:winid)
   endif
 
-  if empty(a:text)
+  if empty(l:grp) || empty(a:mode_label)
     return
   endif
 
   let l:line = getbufline(a:bufnr, a:lnum)[0]
-  let l:idx = stridx(l:line, a:text)
+  let l:idx = stridx(l:line, a:mode_label)
   if l:idx < 0
     return
   endif
 
-  " add new match in that window (lnum is 1-based, col is 1-based)
-  let l:cmd = 'let w:_deepl_mode_mid = matchaddpos("DeeplTrainerAllDone", [['
-        \ . a:lnum . ',' . (l:idx + 1) . ',' . strlen(a:text) . ']])'
+  " add new match in that window
+  let l:cmd = 'let w:_deepl_mode_mid = matchaddpos("' . l:grp . '", [['
+        \ . a:lnum . ',' . (l:idx + 1) . ',' . strlen(a:mode_label) . ']])'
   call win_execute(l:winid, l:cmd)
   let s:deepl_trainer_mode_matchid[l:winid] = getwinvar(l:winid, '_deepl_mode_mid', -1)
 endfunction
-
 "--------------------------------------------------------------------------
 function! deepl#trainer#apply_hl(bufnr, word, tr, show) abort
-  " Must run in trainer window context (call via win_execute()).
   if a:bufnr <= 0
     return
   endif
 
-  " Ensure highlight groups exist (colorscheme may reset them)
+  " Minimal highlight groups (colorscheme-safe)
   if !hlexists('DeepLTrainerUnitWord')
     highlight default DeepLTrainerUnitWord cterm=bold ctermfg=121 gui=bold
+  endif
+  " Same color as DeepLTrainerUnitWord, but NOT bold (for CTX lines)
+  if !hlexists('DeepLTrainerCtxWord')
+    highlight default DeepLTrainerCtxWord cterm=NONE ctermfg=100 gui=NONE
   endif
   if !hlexists('DeepLTrainerTranslationWord')
     highlight default DeepLTrainerTranslationWord cterm=bold ctermfg=221 gui=bold
   endif
-  if !hlexists('DeepLTrainerModeHard')
-    highlight default DeepLTrainerModeHard cterm=bold ctermfg=94 gui=bold
-  endif
-  if !hlexists('DeepLTrainerContextWord')
-    highlight default DeepLTrainerContextWord ctermfg=121 gui=NONE cterm=NONE
-  endif
-
-  " Labels UNIT/TRN/CTX
   if !hlexists('DeepLTrainerLabel')
-    highlight default DeepLTrainerLabel cterm=bold ctermfg=208 gui=bold
+    highlight default DeepLTrainerLabel cterm=bold ctermfg=94 gui=bold
   endif
-
-  " --- Grammar highlight groups ---
-  if !hlexists('DeepLTrainerGrammarTitle')
-    highlight default DeepLTrainerGrammarTitle cterm=bold ctermfg=208 gui=bold
+  if !hlexists('DeepLTrainerGrammarLabel')
+    highlight default DeepLTrainerGrammarLabel cterm=bold ctermfg=136 gui=bold
   endif
-  if !hlexists('DeepLTrainerGrammarKey')
-    highlight default DeepLTrainerGrammarKey cterm=bold ctermfg=215 gui=bold
-  endif
-  if !hlexists('DeepLTrainerGrammarPos')
-    highlight default DeepLTrainerGrammarPos cterm=bold ctermfg=121 gui=bold
-  endif
-  if !hlexists('DeepLTrainerGrammarBullet')
-    highlight default DeepLTrainerGrammarBullet cterm=bold ctermfg=221 gui=bold
-  endif
-  if !hlexists('DeepLTrainerGrammarMore')
-    highlight default DeepLTrainerGrammarMore cterm=bold ctermfg=244 gui=bold
-  endif
-  if !hlexists('DeepLTrainerGrammarEtymology')
-    highlight default DeepLTrainerGrammarEtymology cterm=italic ctermfg=180 gui=italic
-  endif
-
 
   if bufnr('%') != a:bufnr
     execute 'silent! buffer ' . a:bufnr
@@ -146,123 +139,64 @@ function! deepl#trainer#apply_hl(bufnr, word, tr, show) abort
   endif
   let w:deepl_trainer_match_ids = []
 
-  " Highlight UNIT value
-  let l:ln = search('^UNIT:\s*', 'nW')
-  if l:ln > 0 && !empty(a:word)
+  " ---- Highlight CARD line: | word / translation |
+  " Find first line that looks like card line.
+  let l:ln = search('^\s*|\s\+\S', 'nW')
+  if l:ln > 0
     let l:line = getline(l:ln)
-    let l:col0 = matchend(l:line, '^UNIT:\s*') + 1
-    if l:col0 > 0
-      call add(w:deepl_trainer_match_ids,
-            \ matchaddpos('DeepLTrainerUnitWord', [[l:ln, l:col0, strlen(a:word)]]))
-    endif
-  endif
 
-  " Highlight TRN value (only when shown)
-  if a:show
-    let l:ln = search('TRN:\s*', 'nW')
-    if l:ln > 0 && !empty(a:tr)
-      let l:line = getline(l:ln)
-      let l:col0 = matchend(l:line, 'TRN:\s*') + 1
-      if l:col0 > 0
+    " Highlight WORD inside the card line
+    if type(a:word) == v:t_string && !empty(a:word)
+      let l:p = stridx(l:line, a:word)
+      if l:p >= 0
         call add(w:deepl_trainer_match_ids,
-              \ matchaddpos('DeepLTrainerTranslationWord', [[l:ln, l:col0, strlen(a:tr)]]))
+              \ matchaddpos('DeepLTrainerUnitWord', [[l:ln, l:p + 1, strlen(a:word)]]))
+      endif
+    endif
+
+    " Highlight TRANSLATION only when shown
+    if a:show && type(a:tr) == v:t_string && !empty(a:tr)
+      let l:p2 = stridx(l:line, a:tr)
+      if l:p2 >= 0
+        call add(w:deepl_trainer_match_ids,
+              \ matchaddpos('DeepLTrainerTranslationWord', [[l:ln, l:p2 + 1, strlen(a:tr)]]))
       endif
     endif
   endif
 
-  " Highlight word occurrences in CTX lines (word only)
-  if !empty(a:word)
+  " ---- Highlight WORD occurrences in CTX1..CTX3 lines using the SAME color as card word
+  if type(a:word) == v:t_string && !empty(a:word)
     let l:positions = []
-    let l:needle = '\<' . escape(a:word, '\.^$~[]') . '\>'
 
-    " Find CTX line, then also process continuation lines (6 leading spaces)
-    let l:ln = search('^CTX:\s*', 'nW')
-    while l:ln > 0
-      let l:line = getline(l:ln)
+    " case-insensitive whole-word match
+    let l:needle = '\c\<'. escape(a:word, '\.^$~[]\') .'\>'
 
-      if l:line =~# '^CTX:\s*' || l:line =~# '^\s\{6}'
+    for l:lnum in range(1, line('$'))
+      let l:line = getline(l:lnum)
+
+      " Only CTX lines
+      if l:line =~# '^CTX[1-3]:'
         let l:start = 0
         while 1
           let l:m = matchstrpos(l:line, l:needle, l:start)
           if empty(l:m) || l:m[1] < 0
             break
           endif
-          call add(l:positions, [l:ln, l:m[1] + 1, strlen(l:m[0])])
+          call add(l:positions, [l:lnum, l:m[1] + 1, strlen(l:m[0])])
           let l:start = l:m[2]
         endwhile
-        let l:ln += 1
-        continue
       endif
-
-      break
-    endwhile
+    endfor
 
     if !empty(l:positions)
-      call add(w:deepl_trainer_match_ids, matchaddpos('DeepLTrainerContextWord', l:positions))
+      " SAME highlight group as the word in the card line
+      call add(w:deepl_trainer_match_ids, matchaddpos('DeepLTrainerCtxWord', l:positions))
     endif
   endif
-  
-  " Highlight labels UNIT/TRN/CTX
-  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerLabel', '^\zsUNIT:\ze', 200))
-  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerLabel', '^\zsCTX:\ze', 200))
-  " TRN может быть в середине строки
-  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerLabel', '\<TRN:\ze', 200))
 
-  " --- GRAMMAR highlights ---
-
-  " Title line
-  call add(w:deepl_trainer_match_ids,
-        \ matchadd('DeepLTrainerGrammarTitle', '^GRAMMAR:\s*$', 120))
-
-  " Keys (match anywhere in line, not only at start)
-  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerGrammarKey', '\<Word\ze:\s', 110))
-  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerGrammarKey', '\<Stems\ze:\s', 110))
-  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerGrammarKey', '\<Basic definitions\ze:\s*', 110))
-  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerGrammarKey', '\<Etymology\ze:\s*', 110))
-
-" POS-like headers: any "  Something:" line (keys are highlighted with higher priority)
-  call add(w:deepl_trainer_match_ids,
-        \ matchadd('DeepLTrainerGrammarPos',
-        \ '^\s\{2}\zs.\{-}\ze:\s*$', 90)) 
-  " POS value on same line: "... Part of Speech: Noun"
-  " call add(w:deepl_trainer_match_ids,
-        \ matchadd('DeepLTrainerGrammarPos', 'Part of Speech:\s*\zs\w\+', 80))
-
-  " Bullets "- ..."
-  call add(w:deepl_trainer_match_ids,
-        \ matchadd('DeepLTrainerGrammarBullet', '^\s\{4}\zs-\ze\s', 95)) 
-
-  " “… (+N more)”
-  call add(w:deepl_trainer_match_ids,
-        \ matchadd('DeepLTrainerGrammarMore', '^\s\{4}…\s*(+\d\+\s\+more)', 96)) 
-
-  " --- Etymology block highlight (from '  Etymology:' until blank line) ---
-  let l:ety_ln = search('^\s\{2}Etymology:\s', 'nW')
-  if l:ety_ln > 0
-    let l:ln = l:ety_ln
-    while l:ln > 0
-      let l:line = getline(l:ln)
-      if empty(l:line)
-        break
-      endif
-
-      " stop if we left grammar block (Mastery/Keys/Separator etc)
-      if l:line =~# '^\%(Mastery:\|Keys:\|-\{5,}\)'
-        break
-      endif
-
-      " highlight full line
-      call add(w:deepl_trainer_match_ids,
-            \ matchaddpos('DeepLTrainerGrammarEtymology', [[l:ln, 1, strlen(l:line)]], 85))
-
-      let l:ln += 1
-    endwhile
-  endif
-
-  " Highlight Hard:1 in header if present
-  call add(w:deepl_trainer_match_ids,
-        \ matchadd('DeepLTrainerModeHard', 'Hard:\s*1'))
-
+  " ---- Highlight labels: GRAMMAR / CTX1..3
+  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerGrammarLabel', '^\zsGRAMMAR:\ze', 200))
+  call add(w:deepl_trainer_match_ids, matchadd('DeepLTrainerLabel', '^\zsCTX[1-3]:\ze', 200))
 endfunction
 "--------------------------------------------------------------------------
 function! deepl#trainer#next_due_all() abort

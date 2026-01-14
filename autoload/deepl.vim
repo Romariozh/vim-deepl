@@ -320,7 +320,7 @@ function! DeepLTrainerRender(show_translation) abort
 
   " Header (no legacy Count/Hard)
   call add(l:lines, printf(
-        \ ' :Trainer: (%s -> %s)%s Reviewed: %d Run: %dd  ᚨᚲᛚ',
+        \ ':Trainer: (%s -> %s)%s Reviewed: %d Run: %dd  ᚨᚲᛚ',
         \ l:filter, l:lang, l:mode_suffix, l:today_done, l:streak_days))
   
   " SRS details line (replaces old Count/Hard line)
@@ -338,111 +338,94 @@ function! DeepLTrainerRender(show_translation) abort
     let l:due_s = string(l:due_raw)
   endif
 
-  call add(l:lines, printf('✅ reps:%d  🔁 lapses:%d ⚠️  wrong:%d  ⏳ due:%s',
+  call add(l:lines, printf('✅reps:%d  🔁 lapses:%d ⚠️ wrong:%d  ⏳due:%s',
         \ l:reps, l:lapses, l:wrong, l:due_s))
 
   call add(l:lines, l:sep)
 
-  " Card (UNIT + TRN on the same line)
+  " Card (centered)
+  call add(l:lines, '')
   if a:show_translation
-    call add(l:lines, 'UNIT: ' . l:word . '    TRN:  ' . l:tr)
+    let l:card_line = printf('| %s / %s |', l:word, l:tr)
   else
-    call add(l:lines, 'UNIT: ' . l:word . '    TRN: [hidden] (s)')
+    let l:card_line = printf('| %s / [hidden] |', l:word)
   endif
 
-  " Context (up to 2 lines)
-  let l:ctx_lines = s:deepl_wrap(l:ctx, l:width - 6, 3)
-  if !empty(l:ctx_lines)
-   call add(l:lines, 'CTX:  ' . l:ctx_lines[0])
-   if len(l:ctx_lines) > 1 | call add(l:lines, '      ' . l:ctx_lines[1]) | endif
-   if len(l:ctx_lines) > 2 | call add(l:lines, '      ' . l:ctx_lines[2]) | endif
-  endif
- 
-  " --- GRAMMAR (MW) ---
-  let l:g = get(l:res, 'grammar', {})
-  if type(l:g) == v:t_dict && !empty(l:g)
-    call add(l:lines, 'GRAMMAR:')
+  " Center within l:width (use display width, not byte length)
+  let l:card_w = strdisplaywidth(l:card_line)
+  let l:pad = float2nr((l:width - l:card_w) / 2.0)
+  if l:pad < 0 | let l:pad = 0 | endif
+  let l:card_line = repeat(' ', l:pad) . l:card_line
 
-    let l:gw = get(l:g, 'word', '')
-    if !empty(l:gw)
-      call add(l:lines, '  Word: ' . l:gw)
-    endif
+  call add(l:lines, l:card_line)
 
-    " Stems (как у тебя уже хорошо сделано)
-    let l:stems = get(l:g, 'stems', [])
-    if type(l:stems) == v:t_list && !empty(l:stems)
-      let l:st = 'Stems: ' . join(l:stems, ', ')
-      let l:wrapped = s:deepl_wrap(l:st, l:width - 4, 2)
-      if !empty(l:wrapped)
-        call add(l:lines, '  ' . l:wrapped[0])
-        if len(l:wrapped) > 1
-          call add(l:lines, '  ' . repeat(' ', strlen('Stems: ')) . l:wrapped[1])
-        endif
-      endif
-    endif
-
-    " POS blocks
-    let l:pbs = get(l:g, 'pos_blocks', [])
-    if type(l:pbs) == v:t_list && !empty(l:pbs)
-      for l:b in l:pbs
-        let l:pos = get(l:b, 'pos', '')
-        if empty(l:pos) | continue | endif
-        call add(l:lines, '  ' . l:pos . ':')
-
-        let l:defs = get(l:b, 'defs', [])
-        if type(l:defs) == v:t_list
-          for l:d in l:defs
-            let l:wrapped = s:deepl_wrap('- ' . l:d, l:width - 6, 3)
-            if !empty(l:wrapped)
-              call add(l:lines, '    ' . l:wrapped[0])
-              if len(l:wrapped) > 1 | call add(l:lines, '    ' . l:wrapped[1]) | endif
-              if len(l:wrapped) > 2 | call add(l:lines, '    ' . l:wrapped[2]) | endif
-            endif
-          endfor
-        endif
-
-        let l:more = get(l:b, 'more', 0)
-        if l:more > 0
-          call add(l:lines, printf('    … (+%d more)', l:more))
-        endif
-      endfor
-    endif
-
-    " Add etymology at the end if exists
-    let l:ety = get(l:g, 'etymology', '')
-    if !empty(l:ety)
-      " Full line width = l:width (мы уже считаем префикс внутри)
-      let l:ety_lines = s:deepl_wrap_pref(l:ety, '  Etymology: ', l:width, 3)
-      if !empty(l:ety_lines)
-        call extend(l:lines, l:ety_lines)
-      endif
-    endif
-
-    call add(l:lines, '')
-  endif
+  " Remove old CTX: block (we will show CTX1..CTX3 from entries_ctx)
+  " (intentionally no CTX: here)
 
   call add(l:lines, '')
 
+  " --- MW one-line grammar parts (from mw_definitions) ---
+  let l:headword = ''
+  let l:pron = ''
+  let l:audio_mark = '-'
+
+  " If /train/next already returned mw_definitions (optional future), use it.
+  let l:mw = get(l:res, 'mw_definitions', {})
+  if type(l:mw) == v:t_dict && !empty(l:mw)
+    let l:info = get(l:mw, 'info', {})
+    let l:headword = get(l:info, 'headword', '')
+    let l:pron = get(l:info, 'pronunciation', '')
+    let l:audio_ids = get(l:info, 'audio_ids', [])
+    let l:audio_mark = (type(l:audio_ids) == v:t_list && !empty(l:audio_ids)) ? 'voice' : '-'
+  endif
+
+  " --- GRAMMAR line (trainer) ---
+  let l:mw = get(l:res, 'mw_definitions', {})
+  let l:gi = deepl#mw_tr_grammar#extract(l:word, l:mw)
+
+  let l:hw_part = (!empty(get(l:gi, 'headword', '')) ? l:gi.headword : '-')
+  let l:pr_part = (!empty(get(l:gi, 'pron', '')) ? ('[' . l:gi.pron . ']') : '-')
+  let l:am_part = (!empty(get(l:gi, 'audio_mark', '')) ? l:gi.audio_mark : '-')
+
+  call add(l:lines, 'GRAMMAR: ' . l:word . ' / ' . l:hw_part . ' / ' . l:pr_part . ' / ' . l:am_part)
+  call add(l:lines, '')
+
+  " DEBUG:
+  " echom string(get(l:res, 'mw_definitions', {}))
+  
+  " CTX1..CTX3 from backend (entries_ctx)
+  let l:ctxs = get(l:res, 'ctx_list', [])
+  if type(l:ctxs) != v:t_list
+    let l:ctxs = []
+  endif
+
+  " Optional: trim empties (backend sometimes returns '' items)
+  let l:ctxs = filter(copy(l:ctxs), {_, v -> type(v) == v:t_string && !empty(trim(v))})
+
+  " Render only what exists
+  if !empty(l:ctxs)
+    let l:i = 1
+    for l:txt in l:ctxs
+      call add(l:lines, printf('CTX%d: %s', l:i, l:txt))
+      let l:i += 1
+      if l:i > 3 | break | endif
+    endfor
+  endif
+
+  " (stop here; the old multi-line MW grammar block is removed)
+  call add(l:lines, '')
+
+
+  call add(l:lines, l:sep)
   " Stats line (mastery)
   call add(l:lines, printf('Mastery: %s %d%%   %d/%d   thresh:%d',
         \ l:bar, l:percent, l:mastered, l:total, l:thresh))
-
-  call add(l:lines, l:sep)
-
   " Footer (keys must match mappings)
   call add(l:lines, 'Keys: 0,1,2,3,4,5 grade • s show • n skip • q close')
 
   " Write to trainer buffer without switching windows
   call setbufvar(g:deepl_trainer_bufnr, '&modifiable', 1)
-
   call setbufline(g:deepl_trainer_bufnr, 1, l:lines)
-
-  " Highlight [all done] in header when fallback
-  if l:mode ==# 'fallback'
-    call deepl#trainer#apply_mode_hl(g:deepl_trainer_bufnr, 1, 'all done')
-  else
-    call deepl#trainer#apply_mode_hl(g:deepl_trainer_bufnr, 1, '')
-  endif
 
   let l:new_len = len(l:lines)
   let l:old_len = len(getbufline(g:deepl_trainer_bufnr, 1, '$'))
@@ -462,7 +445,11 @@ function! DeepLTrainerRender(show_translation) abort
           \ )
   endif
 
+  call deepl#trainer#apply_mode_hl(g:deepl_trainer_bufnr, 1, l:mode_label)
   call setbufvar(g:deepl_trainer_bufnr, '&modifiable', 0)
+  " Auto-play MW audio 2s after new card appears (if available)
+  call s:DeepLTrainerAutoPlaySchedule()
+
 endfunction
 " -------------------------------------------------------
 " Normalize whitespace to one-line string
@@ -827,6 +814,101 @@ endfunction
 
 " -------------------------------------------------------
 " Functions: Start, Next, Show, DeepLTrainerMarkHard, DeepLTrainerShow
+
+" --- Trainer: auto-play MW audio on card show (no key binding) ---
+let s:trainer_autoplay_timer = -1
+let s:trainer_autoplay_key = ''
+
+function! s:DeepLTrainerCardKey() abort
+  let l:cur = get(g:, 'deepl_trainer_current', {})
+  if type(l:cur) != v:t_dict || empty(l:cur)
+    return ''
+  endif
+
+  " Prefer card_id (SRS), fallback to entry_id
+  let l:cid = get(l:cur, 'card_id', '')
+  let l:eid = get(l:cur, 'entry_id', '')
+  let l:term = get(l:cur, 'term', get(l:cur, 'word', ''))
+
+  if l:cid !=# ''
+    return 'C:' . string(l:cid) . '|' . l:term
+  endif
+  if l:eid !=# ''
+    return 'E:' . string(l:eid) . '|' . l:term
+  endif
+  return l:term
+endfunction
+
+function! s:DeepLTrainerAutoPlaySchedule() abort
+  " feature flags
+  if get(g:, 'deepl_trainer_autoplay', 1) != 1
+    return
+  endif
+  if !exists('*timer_start')
+    return
+  endif
+
+  " only when trainer buffer is visible
+  if bufwinnr('__DeepL_Trainer__') < 0
+    return
+  endif
+
+  if get(g:, 'deepl_backend', '') !=# 'http'
+    return
+  endif
+  if empty(get(g:, 'deepl_api_base', ''))
+    return
+  endif
+
+  " audio ids must be ready (they are set during render by mw_tr_grammar extractor)
+  let l:ids = get(g:, 'deepl_mw_audio_ids', [])
+  if type(l:ids) != v:t_list || empty(l:ids)
+    return
+  endif
+
+  let l:key = s:DeepLTrainerCardKey()
+  if empty(l:key)
+    return
+  endif
+
+  " Don't re-play on re-render of same card
+  if l:key ==# s:trainer_autoplay_key
+    return
+  endif
+
+  " Remember key and (re)schedule
+  let s:trainer_autoplay_key = l:key
+
+  if type(s:trainer_autoplay_timer) == v:t_number && s:trainer_autoplay_timer > 0
+    call timer_stop(s:trainer_autoplay_timer)
+  endif
+
+  let l:delay = get(g:, 'deepl_trainer_autoplay_delay_ms', 2000)
+  let s:trainer_autoplay_timer = timer_start(l:delay, function('s:DeepLTrainerAutoPlayCb', [l:key]))
+  echom 'TR-AUDIO schedule: backend=' . get(g:,'deepl_backend','') . ' api=' . get(g:,'deepl_api_base','')
+  echom 'TR-AUDIO ids=' . string(get(g:,'deepl_mw_audio_ids', [])) . ' key=' . s:DeepLTrainerCardKey()
+
+endfunction
+
+function! s:DeepLTrainerAutoPlayCb(key, timer) abort
+  echom 'TR-AUDIO cb fired: timer=' . a:timer . ' key=' . a:key . ' cur=' . s:DeepLTrainerCardKey()
+
+  if a:key !=# s:trainer_autoplay_key
+    return
+  endif
+
+  let l:ids = get(g:, 'deepl_mw_audio_ids', [])
+  if type(l:ids) != v:t_list || empty(l:ids)
+    return
+  endif
+
+  let g:deepl_mw_audio_idx = deepl#mw_audio#handle_f4(
+        \ function('s:http_post_json'),
+        \ get(g:, 'deepl_api_base', ''),
+        \ l:ids,
+        \ 0
+        \ )
+endfunction
 
 function! DeepLTrainerNext() abort
   if g:deepl_trainer_bufnr <= 0 || !bufexists(g:deepl_trainer_bufnr)

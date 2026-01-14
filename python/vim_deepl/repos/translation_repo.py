@@ -178,7 +178,7 @@ class TranslationRepo:
             return dict(row) if row else None
 
     def touch_ctx_usage(self, term: str, src_lang: str, dst_lang: str, ctx_hash: str, now_s: str) -> None:
-        with self.db.tx() as conn:
+        with self.db.tx_write() as conn:
             ensure_schema(conn)
             conn.execute(
                 """

@@ -4,10 +4,10 @@ import sqlite3
 import json
 import re
 from typing import Optional, Any, Dict, List
-
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
+from pathlib import Path
 
 # Make sure we can import vim_deepl from ./python
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +35,35 @@ app.include_router(bookmarks_router)
 
 DICT_BASE = os.path.expanduser("~/.local/share/vim-deepl")
 _MW_TAG_RE = re.compile(r"\{[^}]+\}")  # strips {it} {/it} {bc} {ldquo} {sx|...} etc.
+
+def _trainer_ctx_list(db_path: Path, term: str, src_lang: str, dst_lang: str, limit: int = 3) -> List[str]:
+    term = (term or "").strip()
+    src_lang = (src_lang or "").strip().upper()
+    dst_lang = (dst_lang or "").strip().upper()
+    if not term or not src_lang or not dst_lang:
+        return []
+
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout = 10000;")
+        rows = conn.execute(
+            """
+            SELECT ctx_text
+            FROM entries_ctx
+            WHERE term = ?
+              AND src_lang = ?
+              AND dst_lang = ?
+              AND COALESCE(TRIM(ctx_text), '') != ''
+            ORDER BY COALESCE(last_used, created_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (term, src_lang, dst_lang, limit),
+        ).fetchall()
+        return [r["ctx_text"].strip() for r in rows if r["ctx_text"]]
+    finally:
+        conn.close()
+
 
 @app.on_event("startup")
 def _startup() -> None:
@@ -203,6 +232,15 @@ def api_train_next(payload: TrainNextRequest):
     if isinstance(result, dict) and not result.get("error"):
         try:
             db_path = _guess_vocab_db_path(DICT_BASE)
+
+            term = (result.get("term") or "").strip()
+            src = (payload.src_filter or result.get("src_lang") or "EN").strip().upper()
+            dst = (result.get("dst_lang") or "RU").strip().upper()  # если у тебя другое — подставь
+            if term:
+                result["ctx_list"] = _trainer_ctx_list(db_path, term, src, dst, limit=3)
+            else:
+                result["ctx_list"] = []
+
             _attach_ctx_and_detected(db_path, result, payload.src_filter)
 
             # Attach SRS fields (reps/lapses/wrong_streak/...)
@@ -215,16 +253,28 @@ def api_train_next(payload: TrainNextRequest):
                         result[k] = v
 
             # Attach stats (mastery)
-            src = payload.src_filter or result.get("src_lang") or None
-            result["stats"] = _trainer_stats(db_path, src, mastery_count)
+            stats_src = payload.src_filter or result.get("src_lang") or None
+            result["stats"] = _trainer_stats(db_path, stats_src, mastery_count)
 
             # Attach grammar (MW)
             term = (result.get("term") or "").strip()
-            src_lang = (result.get("src_lang") or payload.src_filter or "EN").strip()
+            src_lang = (result.get("src_lang") or payload.src_filter or "EN").strip().upper()
+
+            # trainer needs raw_json + audio_ids from mw_definitions table
+            result["mw_definitions"] = _mw_definitions_from_db(db_path, term, src_lang) if term else None
+
+            # optional: existing pretty grammar dict (can stay)
             if term:
                 g = _mw_attach_grammar(db_path, term, src_lang)
                 if g:
                     result["grammar"] = g
+                    try:
+                        ...
+                        result["grammar_line"] = " / ".join(parts)
+                    except Exception:
+                        result["grammar_line"] = ""
+            else:
+                result["grammar_line"] = ""
 
         except Exception:
             pass
@@ -247,6 +297,18 @@ def api_train_review(payload: TrainReviewRequest):
     if isinstance(result, dict) and not result.get("error"):
         try:
             db_path = _guess_vocab_db_path(DICT_BASE)
+
+            term = (result.get("term") or "").strip()
+            src = (payload.src_filter or result.get("src_lang") or "EN").strip().upper()
+            dst = (result.get("dst_lang") or "RU").strip().upper()
+
+            # ✅ mw_definitions for trainer (raw_json + audio_ids)
+            result["mw_definitions"] = _mw_definitions_from_db(db_path, term, src) if term else None
+
+            # ✅ ctx_list for trainer
+            result["ctx_list"] = _trainer_ctx_list(db_path, term, src, dst, limit=3) if term else []
+
+            # Keep old fields too (if you still need them elsewhere)
             _attach_ctx_and_detected(db_path, result, payload.src_filter)
 
             # Attach SRS fields (reps/lapses/wrong_streak/...)
@@ -258,14 +320,12 @@ def api_train_review(payload: TrainReviewRequest):
                         result[k] = v
 
             # Attach stats (mastery)
-            src = payload.src_filter or result.get("src_lang") or None
-            result["stats"] = _trainer_stats(db_path, src, mastery_count)
+            stats_src = payload.src_filter or result.get("src_lang") or None
+            result["stats"] = _trainer_stats(db_path, stats_src, mastery_count)
 
-            # Attach grammar (MW)
-            term = (result.get("term") or "").strip()
-            src_lang = (result.get("src_lang") or payload.src_filter or "EN").strip()
+            # Attach grammar (MW) — один раз
             if term:
-                g = _mw_attach_grammar(db_path, term, src_lang)
+                g = _mw_attach_grammar(db_path, term, src)
                 if g:
                     result["grammar"] = g
 
@@ -485,6 +545,74 @@ def _mw_clean(s: str) -> str:
     # всё вида {sx|embrace:1||1} и т.п.
     s = re.sub(r"\{[^}]+\}", "", s)
     return " ".join(s.split()).strip()
+
+def _mw_definitions_from_db(db_path, term: str, src_lang: str) -> Optional[Dict[str, Any]]:
+    term = (term or "").strip()
+    src_lang = (src_lang or "").strip().upper()
+    if not term or not src_lang:
+        return None
+
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout = 10000;")
+
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(mw_definitions)").fetchall()]
+
+        # raw MW json column name (support older schemas)
+        raw_col = None
+        for c in ("raw_json", "raw", "defs_json", "defs", "payload_json"):
+            if c in cols:
+                raw_col = c
+                break
+        if raw_col is None:
+            return None
+
+        audio_ids_col = "audio_ids" if "audio_ids" in cols else None
+        audio_mark_col = "audio_mark" if "audio_mark" in cols else None
+
+        select_cols = [f"{raw_col} AS raw_json"]
+        if audio_ids_col:
+            select_cols.append(f"{audio_ids_col} AS audio_ids")
+        if audio_mark_col:
+            select_cols.append(f"{audio_mark_col} AS audio_mark")
+
+        sql = f"""
+        SELECT {", ".join(select_cols)}
+        FROM mw_definitions
+        WHERE term=? AND src_lang=?
+        ORDER BY id DESC
+        LIMIT 1
+        """
+        row = conn.execute(sql, (term, src_lang)).fetchone()
+        if not row:
+            return None
+
+        raw_json = row["raw_json"] or ""
+
+        audio_ids = []
+        if audio_ids_col:
+            ai = row["audio_ids"]
+            # audio_ids stored as JSON string like '["travel01"]'
+            if isinstance(ai, str) and ai.strip():
+                try:
+                    audio_ids = json.loads(ai)
+                except Exception:
+                    audio_ids = []
+            elif isinstance(ai, (list, tuple)):
+                audio_ids = list(ai)
+
+        audio_mark = ""
+        if audio_mark_col:
+            audio_mark = row["audio_mark"] or ""
+
+        return {
+            "raw_json": raw_json,      # <-- string, Vim будет json_decode()
+            "audio_ids": audio_ids,    # <-- list
+            "audio_mark": audio_mark,  # <-- string (не обязателен, но пусть будет)
+        }
+    finally:
+        conn.close()
 
 def _mw_attach_grammar(db_path: str, term: str, src_lang: str) -> dict | None:
     term = (term or "").strip()
