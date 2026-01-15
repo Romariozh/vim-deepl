@@ -1,6 +1,13 @@
 " autoload/deepl/trainer.vim
 scriptencoding utf-8
 
+function! s:center_line(text) abort
+  let l:w = winwidth(0)
+  let l:t = a:text
+  let l:pad = max([0, (l:w - strdisplaywidth(l:t)) / 2])
+  return repeat(' ', l:pad) . l:t
+endfunction
+
 " Wrap text to width, return list of lines (simple word wrap).
 function! deepl#trainer#wrap(text, width) abort
   let l:words = split(substitute(a:text, '\s\+', ' ', 'g'), ' ')

@@ -55,6 +55,30 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # --- Translation variants (accumulate multiple meanings per term) ---
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS entry_translations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            term        TEXT NOT NULL,
+            translation TEXT NOT NULL,
+            src_lang    TEXT NOT NULL,
+            dst_lang    TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            last_used   TEXT,
+            count       INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(term, src_lang, dst_lang, translation)
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_entry_translations_lookup
+            ON entry_translations(term, src_lang, dst_lang)
+        """
+    )
+
     # --- Merriam-Webster definitions table (per term, per src_lang) ---
     conn.execute(
         """

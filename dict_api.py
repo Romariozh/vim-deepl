@@ -238,8 +238,10 @@ def api_train_next(payload: TrainNextRequest):
             dst = (result.get("dst_lang") or "RU").strip().upper()  # если у тебя другое — подставь
             if term:
                 result["ctx_list"] = _trainer_ctx_list(db_path, term, src, dst, limit=3)
+                result["variants"] = _entry_translations_list(db_path, term, src, dst, limit=10)
             else:
                 result["ctx_list"] = []
+                result["variants"] = []
 
             _attach_ctx_and_detected(db_path, result, payload.src_filter)
 
@@ -307,6 +309,8 @@ def api_train_review(payload: TrainReviewRequest):
 
             # ✅ ctx_list for trainer
             result["ctx_list"] = _trainer_ctx_list(db_path, term, src, dst, limit=3) if term else []
+
+            result["variants"] = _entry_translations_list(db_path, term, src, dst, limit=10) if term else []
 
             # Keep old fields too (if you still need them elsewhere)
             _attach_ctx_and_detected(db_path, result, payload.src_filter)
@@ -806,3 +810,22 @@ def _attach_ctx_and_detected(db_path: str, result: dict, src_filter: str | None 
     finally:
         con.close()
 
+def _entry_translations_list(db_path: str, term: str, src: str, dst: str, limit: int = 10) -> list[dict]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_schema(conn)
+
+        rows = conn.execute(
+            """
+            SELECT translation, count, last_used, created_at
+            FROM entry_translations
+            WHERE trim(term) = trim(?) COLLATE NOCASE
+              AND upper(trim(src_lang)) = upper(trim(?))
+              AND upper(trim(dst_lang)) = upper(trim(?))
+            ORDER BY COALESCE(last_used, created_at) ASC
+            LIMIT ?
+            """,
+            (term, src, dst, limit),
+        ).fetchall()
+
+        return [dict(r) for r in rows]

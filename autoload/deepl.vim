@@ -308,6 +308,60 @@ function! DeepLTrainerRender(show_translation) abort
   let l:fill = max([0, min([l:bar_w, l:fill])])
   let l:bar = '[' . repeat('#', l:fill) . repeat('-', l:bar_w - l:fill) . ']'
 
+  let l:mode_tr = get(g:, 'deepl_trainer_tr_mode', 1) " 1=top3, 2=top3+rest
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+  " Build TOP3 + REST from variants (by count desc)
+  let l:variants = get(l:res, 'variants', [])
+  let l:items = []
+  let l:seen = {}
+
+  " Collect unique translations with counts
+  if type(l:variants) == v:t_list
+    for l:v in l:variants
+      let l:t = trim(get(l:v, 'translation', ''))
+      let l:c = get(l:v, 'count', 0)
+      if !empty(l:t) && !has_key(l:seen, l:t)
+        let l:seen[l:t] = 1
+        call add(l:items, {'t': l:t, 'c': l:c})
+      endif
+    endfor
+  endif
+
+  " Ensure base translation included too (if missing)
+  if type(l:tr) == v:t_string
+    let l:base = trim(l:tr)
+    if !empty(l:base) && !has_key(l:seen, l:base)
+      call add(l:items, {'t': l:base, 'c': 0})
+    endif
+  endif
+
+  " Sort by count DESC
+  call sort(l:items, {a,b -> get(b,'c',0) - get(a,'c',0)})
+
+  " Split into top3 + rest
+  let l:top = []
+  let l:rest = []
+  for l:i in range(0, len(l:items)-1)
+    if l:i < 3
+      call add(l:top, l:items[l:i].t)
+    else
+      call add(l:rest, l:items[l:i].t)
+    endif
+  endfor
+
+  " Optional: limit how many to show in rest line
+  let l:rest_max = get(g:, 'deepl_trainer_variants_rest_max', 10)
+  if len(l:rest) > l:rest_max
+    let l:rest = l:rest[:l:rest_max-1]
+  endif
+
+  let l:tr_top  = join(l:top, ', ')
+  let l:tr_rest = join(l:rest, ', ')
+
+  " What goes into the card line
+  let l:tr_show = empty(l:tr_top) ? l:tr : l:tr_top
+  "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
   " Context: show only if it looks like a sentence
   if type(l:ctx) != v:t_string
     let l:ctx = ''
@@ -346,9 +400,13 @@ function! DeepLTrainerRender(show_translation) abort
   " Card (centered)
   call add(l:lines, '')
   if a:show_translation
-    let l:card_line = printf('| %s / %s |', l:word, l:tr)
+    let l:card_line = printf('| %s / %s |', l:word, l:tr_show)
   else
     let l:card_line = printf('| %s / [hidden] |', l:word)
+  endif
+
+  if a:show_translation && l:mode_tr == 2 && !empty(l:tr_rest)
+    call add(l:lines, s:center_line(l:tr_rest))
   endif
 
   " Center within l:width (use display width, not byte length)
@@ -440,7 +498,7 @@ function! DeepLTrainerRender(show_translation) abort
           \ 'call deepl#trainer#apply_hl('
           \ . g:deepl_trainer_bufnr . ', '
           \ . string(l:word) . ', '
-          \ . string(l:tr) . ', '
+          \ . string(l:tr_show) . ', '
           \ . a:show_translation . ')'
           \ )
   endif
@@ -885,13 +943,10 @@ function! s:DeepLTrainerAutoPlaySchedule() abort
 
   let l:delay = get(g:, 'deepl_trainer_autoplay_delay_ms', 2000)
   let s:trainer_autoplay_timer = timer_start(l:delay, function('s:DeepLTrainerAutoPlayCb', [l:key]))
-  echom 'TR-AUDIO schedule: backend=' . get(g:,'deepl_backend','') . ' api=' . get(g:,'deepl_api_base','')
-  echom 'TR-AUDIO ids=' . string(get(g:,'deepl_mw_audio_ids', [])) . ' key=' . s:DeepLTrainerCardKey()
 
 endfunction
 
 function! s:DeepLTrainerAutoPlayCb(key, timer) abort
-  echom 'TR-AUDIO cb fired: timer=' . a:timer . ' key=' . a:key . ' cur=' . s:DeepLTrainerCardKey()
 
   if a:key !=# s:trainer_autoplay_key
     return
@@ -1190,13 +1245,19 @@ function! DeepLTrainerReview(grade) abort
         \ })
 endfunction
 
-
 function! DeepLTrainerShow() abort
-  if empty(g:deepl_trainer_current)
-    return
+  if !exists('g:deepl_trainer_tr_mode')
+    let g:deepl_trainer_tr_mode = 1
   endif
-  " 1 = show translation
+  let g:deepl_trainer_tr_mode = (g:deepl_trainer_tr_mode == 1 ? 2 : 1)
   call DeepLTrainerRender(1)
+endfunction
+
+function! s:center_line(text) abort
+  let l:w = winwidth(0)
+  let l:t = a:text
+  let l:pad = max([0, (l:w - strdisplaywidth(l:t)) / 2])
+  return repeat(' ', l:pad) . l:t
 endfunction
 
 function! deepl#trainer_start() abort

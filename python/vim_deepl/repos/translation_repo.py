@@ -24,6 +24,20 @@ def _ctx_for_storage(context: str | None) -> str | None:
         return ctx
     return None
 
+def _norm_translation(s: str) -> str:
+    s = re.sub(r"\s+", " ", (s or "").strip())
+    return s.strip(" \t\r\n.,;:!?")
+
+def _should_store_variant(term: str, translation: str) -> bool:
+    t = (term or "").strip().casefold()
+    tr = (translation or "").strip().casefold()
+    if not t or not tr:
+        return False
+    # filter obvious "not translated" case (ought -> ought)
+    if tr == t:
+        return False
+    return True
+
 @dataclass(frozen=True)
 class TranslationRepo:
     db: SQLiteRepo
@@ -89,6 +103,19 @@ class TranslationRepo:
                 """,
                 (now_s, entry_id),
             )
+            # Keep translation variant stats in sync with base cache hits
+            conn.execute(
+                """
+                INSERT INTO entry_translations(term, translation, src_lang, dst_lang, created_at, last_used, count)
+                SELECT term, translation, src_lang, dst_lang, created_at, ?, 1
+                FROM entries
+                WHERE id = ?
+                ON CONFLICT(term, src_lang, dst_lang, translation) DO UPDATE SET
+                    last_used = excluded.last_used,
+                    count     = entry_translations.count + 1
+                """,
+                (now_s, entry_id),
+            )
 
     def upsert_base_entry(
         self,
@@ -118,6 +145,39 @@ class TranslationRepo:
                 """,
                 (term, translation, src_lang, dst_lang, detected_raw_to_store, now_s, now_s),
             )
+            # Accumulate translation variants (multiple meanings per term)
+            conn.execute(
+                """
+                INSERT INTO entry_translations (
+                    term, translation, src_lang, dst_lang,
+                    created_at, last_used, count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(term, src_lang, dst_lang, translation) DO UPDATE SET
+                    last_used = excluded.last_used,
+                    count     = entry_translations.count + 1
+                """,
+                (term, translation, src_lang, dst_lang, now_s, now_s),
+            )
+
+    def list_entry_translations(self, term: str, src_lang: str, dst_lang: str, limit: int = 20) -> list[dict]:
+        with self.db.read() as conn:
+            ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT translation, count, last_used, created_at
+                FROM entry_translations
+                WHERE trim(term) = trim(?) COLLATE NOCASE
+                  AND upper(trim(src_lang)) = upper(trim(?))
+                  AND upper(trim(dst_lang)) = upper(trim(?))
+                ORDER BY
+                  COALESCE(last_used, created_at) DESC,
+                  count DESC
+                LIMIT ?
+                """,
+                (term, src_lang, dst_lang, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     # -------------------------
     # Context cache: entries_ctx
@@ -252,6 +312,23 @@ class TranslationRepo:
                 (term, translation, src_lang, dst_lang, ctx_hash, ctx_text, now_s, now_s),
             )
 
+            # Also accumulate translation variants from contexts
+            tr_norm = _norm_translation(translation)
+            if _should_store_variant(term, tr_norm):
+                conn.execute(
+                    """
+                    INSERT INTO entry_translations (
+                        term, translation, src_lang, dst_lang,
+                        created_at, last_used, count
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(term, src_lang, dst_lang, translation) DO UPDATE SET
+                        last_used = excluded.last_used,
+                        count     = entry_translations.count + 1
+                    """,
+                    (term, tr_norm, src_lang, dst_lang, now_s, now_s),
+                )
+
             # Keep only MAX_CTX contexts per (term, src_lang, dst_lang),
             # prefer most recently used; never delete the current ctx_hash.
             conn.execute(
@@ -325,7 +402,6 @@ class TranslationRepo:
                 "audio_ids": _loads(row["audio_ids"]),
                 "created_at": row["created_at"],
             }
-
 
     def upsert_mw_definitions(self, term: str, src_lang: str, defs: dict, now_s: str) -> None:
         """
